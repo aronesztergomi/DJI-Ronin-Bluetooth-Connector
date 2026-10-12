@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/rs3", "crates/rs3-ffi"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/aron/rs3-studio"
+
+[workspace.dependencies]
+rs3 = { path = "crates/rs3" }

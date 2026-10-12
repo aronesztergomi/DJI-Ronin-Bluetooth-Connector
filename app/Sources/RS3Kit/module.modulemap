@@ -1,0 +1,4 @@
+module RS3Kit {
+    header "include/rs3.h"
+    export *
+}

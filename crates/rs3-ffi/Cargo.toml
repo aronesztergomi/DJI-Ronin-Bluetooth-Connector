@@ -1,0 +1,13 @@
+[package]
+name = "rs3-ffi"
+description = "C ABI for the rs3 gimbal library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+rs3.workspace = true
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "sync", "time"] }
