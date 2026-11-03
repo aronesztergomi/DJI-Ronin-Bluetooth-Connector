@@ -131,7 +131,7 @@ final class GimbalController: ObservableObject {
 
     func beginMove(_ direction: Direction) {
         guard handle != nil, isAllowed(direction) else { return }
-        startSending { [weak self] in self.mapDirection(direction) }
+        startSending { [weak self] in self?.mapDirection(direction) }
     }
 
     func setStick(x: Double, y: Double) {
