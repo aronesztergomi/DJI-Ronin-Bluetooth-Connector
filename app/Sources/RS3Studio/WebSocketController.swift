@@ -50,7 +50,7 @@ final class WebSocketController: ObservableObject {
             parameters.defaultProtocolStack.applicationProtocols.insert(websocket, at: 0)
             let newListener = try NWListener(using: parameters, on: nwPort)
             newListener.newConnectionHandler = { [weak self] connection in
-                self?.accept(connection)
+                Task { @MainActor in self?.accept(connection) }
             }
             newListener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor in
@@ -99,11 +99,15 @@ final class WebSocketController: ObservableObject {
     private func accept(_ connection: NWConnection) {
         let id = ObjectIdentifier(connection)
         connections[id] = connection
-        let stateHandler: @Sendable (NWConnection.State) -> Void = { [weak self] state in
-            if case .failed = state { self?.remove(connection, id: id) }
-            if case .cancelled = state { self?.remove(connection, id: id) }
+        connection.stateUpdateHandler = { [weak self] state in
+            guard case .failed = state else {
+                if case .cancelled = state {
+                    Task { @MainActor in self?.remove(connection, id: id) }
+                }
+                return
+            }
+            Task { @MainActor in self?.remove(connection, id: id) }
         }
-        connection.stateUpdateHandler = stateHandler
         connection.start(queue: queue)
         receive(on: connection, id: id, authenticated: false)
     }
@@ -115,35 +119,41 @@ final class WebSocketController: ObservableObject {
 
     private func receive(on connection: NWConnection, id: ObjectIdentifier, authenticated: Bool) {
         connection.receiveMessage { [weak self] data, context, _, error in
-            guard let self else { connection.cancel(); return }
-            guard error == nil, let data, data.count <= 512,
-                  let text = String(data: data, encoding: .utf8),
-                  let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
-                  metadata.opcode == .text else {
-                self.remove(connection, id: id)
+            Task { @MainActor in
+                guard let self else { connection.cancel(); return }
+                self.handleMessage(data: data, context: context, error: error,
+                                   on: connection, id: id, authenticated: authenticated)
+            }
+        }
+    }
+
+    private func handleMessage(data: Data?, context: NWConnection.ContentContext?, error: NWError?,
+                               on connection: NWConnection, id: ObjectIdentifier, authenticated: Bool) {
+        guard error == nil, let data, data.count <= 512,
+              let text = String(data: data, encoding: .utf8),
+              let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
+              metadata.opcode == .text else {
+            remove(connection, id: id)
+            return
+        }
+
+        var isAuthenticated = authenticated
+        if !isAuthenticated {
+            isAuthenticated = text == "auth:\(token)"
+            reply(isAuthenticated ? "ready" : "unauthorized", to: connection)
+            if !isAuthenticated {
+                remove(connection, id: id)
                 return
             }
-
-            var isAuthenticated = authenticated
-            if !isAuthenticated {
-                isAuthenticated = text == "auth:\(self.token)"
-                self.reply(isAuthenticated ? "ready" : "unauthorized", to: connection)
-                if !isAuthenticated {
-                    self.remove(connection, id: id)
-                    return
-                }
-            } else if let command = Self.parse(text) {
-                let limits = self.currentLimits
-                Task { @MainActor in
-                    self.gimbal.setRemotePanTilt(pan: command.pan, tilt: command.tilt,
-                                                 panLimit: limits.pan, tiltLimit: limits.tilt)
-                }
-                self.reply("ok", to: connection)
-            } else {
-                self.reply("error: expected pan:X tilt:Y", to: connection)
-            }
-            self.receive(on: connection, id: id, authenticated: isAuthenticated)
+        } else if let command = Self.parse(text) {
+            let limits = currentLimits
+            gimbal.setRemotePanTilt(pan: command.pan, tilt: command.tilt,
+                                    panLimit: limits.pan, tiltLimit: limits.tilt)
+            reply("ok", to: connection)
+        } else {
+            reply("error: expected pan:X tilt:Y", to: connection)
         }
+        receive(on: connection, id: id, authenticated: isAuthenticated)
     }
 
     private var currentLimits: (pan: Double, tilt: Double) {
@@ -156,7 +166,7 @@ final class WebSocketController: ObservableObject {
         connection.send(content: Data(text.utf8), contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
     }
 
-    private static func parse(_ message: String) -> (pan: Double, tilt: Double)? {
+    private nonisolated static func parse(_ message: String) -> (pan: Double, tilt: Double)? {
         let tokens = message.split(whereSeparator: { $0.isWhitespace || $0 == "," })
         guard tokens.count == 2 else { return nil }
         var values: [String: Double] = [:]
