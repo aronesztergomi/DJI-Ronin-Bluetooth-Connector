@@ -97,6 +97,47 @@ be run from a terminal you launched yourself; the app just asks properly.
 
 A session log lands at `~/Library/Logs/RoninStudio.log`.
 
+## WebSocket control bridge
+
+Enable the WebSocket listener in the Preferences tab. It defaults to port `81`;
+choose another port there if needed. The first text frame authenticates the
+connection, and subsequent frames carry pan/tilt values:
+
+```text
+auth:<token>
+pan:0.5 tilt:-0.25
+pan:0 tilt:0
+```
+
+Copy the token shown in Preferences into the client. Pan and tilt are normalized
+to `[-1, 1]` (positive pan is right; positive tilt is up). Preferences provides
+independent maximum pan and tilt command strengths from 0% to 100%; these cap
+speed command magnitude, not physical gimbal angle. A real angular limit cannot
+be guaranteed because the gimbal does not report its current position.
+
+Send updates at roughly 10 Hz while moving. If updates stop, the bridge stops the
+gimbal after 600 ms. For example, with Python's `websockets` package installed:
+
+```python
+import asyncio
+import websockets
+
+async def main():
+    async with websockets.connect("ws://localhost:81") as ws:
+        await ws.send("auth:<token-from-preferences>")
+        print(await ws.recv())  # ready
+        await ws.send("pan:0.5 tilt:-0.25")
+        print(await ws.recv())  # ok
+        await ws.send("pan:0 tilt:0")
+
+asyncio.run(main())
+```
+
+The listener accepts connections on the Mac's network interfaces. Keep the
+token private and prefer a trusted VPN or authenticated tunnel rather than
+exposing the port directly to the public Internet. See
+[`docs/websocket-control.md`](docs/websocket-control.md) for the full protocol.
+
 ## Using the library
 
 ```rust
