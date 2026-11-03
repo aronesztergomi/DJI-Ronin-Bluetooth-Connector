@@ -9,7 +9,7 @@ import SwiftUI
 final class WebSocketController: ObservableObject {
     @Published var enabled: Bool { didSet { persist(); if !isApplying { applySettings() } } }
     @Published var port: Int { didSet { persist(); if !isApplying { applySettings() } } }
-    @Published var requireAccessToken: Bool { didSet { persist(); if !isApplying { applySettings() } } }
+    @Published var requireAccessToken: Bool { didSet { persist() } }
     @Published var panLimit: Double { didSet { persist() } }
     @Published var tiltLimit: Double { didSet { persist() } }
     @Published var loggingEnabled: Bool {
@@ -25,6 +25,7 @@ final class WebSocketController: ObservableObject {
     private let defaults = UserDefaults.standard
     private let queue = DispatchQueue(label: "co.rs3studio.websocket")
     private var listener: NWListener?
+    private var listenerID: UUID?
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var isApplying = false
 
@@ -45,9 +46,26 @@ final class WebSocketController: ObservableObject {
         loggingEnabled = defaults.object(forKey: Keys.loggingEnabled) as? Bool ?? false
     }
 
+    /// Reconcile the live listener with preferences. Cancellation is asynchronous:
+    /// if a listener exists, wait for its `.cancelled` state before rebinding the
+    /// port. This avoids racing the OS while it releases the old listening socket.
     func applySettings() {
-        stop()
-        guard enabled else { return }
+        guard enabled else {
+            stop()
+            return
+        }
+        if let listener {
+            status = "Restarting listener…"
+            wsLog("restart requested; waiting for current listener to cancel")
+            listener.cancel()
+            stopConnections()
+            return
+        }
+        startListener()
+    }
+
+    private func startListener() {
+        guard enabled, listener == nil else { return }
         guard (1...65535).contains(port), let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             status = "Invalid port"
             wsLog("invalid port setting: \(port)")
@@ -59,32 +77,44 @@ final class WebSocketController: ObservableObject {
             websocket.autoReplyPing = true
             parameters.defaultProtocolStack.applicationProtocols.insert(websocket, at: 0)
             let newListener = try NWListener(using: parameters, on: nwPort)
+            let id = UUID()
+            listener = newListener
+            listenerID = id
             newListener.newConnectionHandler = { [weak self] connection in
                 Task { @MainActor in self?.accept(connection) }
             }
             newListener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor in
+                    guard let self, self.listenerID == id else { return }
                     switch state {
                     case .ready:
-                        self?.isListening = true
-                        self?.status = "Listening on port \(self?.port ?? 0)"
-                        self?.wsLog("listener ready on port \(self?.port ?? 0)")
+                        self.isListening = true
+                        self.status = "Listening on port \(self.port)"
+                        self.wsLog("listener ready on port \(self.port)")
                     case .failed(let error):
-                        self?.isListening = false
-                        self?.status = "Listener error: \(error.localizedDescription)"
-                        self?.wsLog("listener failed: \(error.localizedDescription)")
+                        self.isListening = false
+                        self.status = "Listener error: \(error.localizedDescription)"
+                        self.wsLog("listener failed: \(error.localizedDescription)")
+                        self.listener = nil
+                        self.listenerID = nil
                     case .cancelled:
-                        self?.isListening = false
-                        self?.status = "Stopped"
-                        self?.wsLog("listener cancelled")
+                        self.isListening = false
+                        self.listener = nil
+                        self.listenerID = nil
+                        self.wsLog("listener cancelled")
+                        if self.enabled {
+                            self.wsLog("starting listener with current preferences on port \(self.port)")
+                            self.startListener()
+                        } else {
+                            self.status = "Stopped"
+                        }
                     default: break
                     }
                 }
             }
-            listener = newListener
-            newListener.start(queue: queue)
             status = "Starting…"
             wsLog("starting listener on port \(port)")
+            newListener.start(queue: queue)
         } catch {
             status = "Could not listen: \(error.localizedDescription)"
             wsLog("failed to create listener on port \(port): \(error.localizedDescription)")
@@ -92,13 +122,19 @@ final class WebSocketController: ObservableObject {
     }
 
     func stop() {
-        if listener != nil { wsLog("stopping listener") }
-        listener?.cancel()
-        listener = nil
+        if listener != nil {
+            wsLog("stopping listener; waiting for socket release")
+            status = "Stopping…"
+            listener?.cancel()
+        } else {
+            status = "Stopped"
+        }
+        stopConnections()
+    }
+
+    private func stopConnections() {
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
-        isListening = false
-        status = "Stopped"
         gimbal.stopRemoteMotion()
     }
 
@@ -195,8 +231,6 @@ final class WebSocketController: ObservableObject {
             return
         }
 
-        // In no-token mode, the first message is a motion command. It does not
-        // require an auth frame and subsequent commands are handled identically.
         isAuthenticated = true
         if let command = Self.parse(text) {
             let pan = command.pan ?? 0
@@ -234,8 +268,7 @@ final class WebSocketController: ObservableObject {
         })
     }
 
-    /// Parse one or both axes. An omitted axis is represented as nil and is
-    /// driven at zero for that command, so pan-only input cannot move tilt.
+    /// Parse one or both axes. An omitted axis is driven at zero for that frame.
     private nonisolated static func parse(_ message: String) -> (pan: Double?, tilt: Double?)? {
         let tokens = message.split(whereSeparator: { $0.isWhitespace || $0 == "," })
         guard (1...2).contains(tokens.count) else { return nil }
