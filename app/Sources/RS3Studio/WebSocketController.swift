@@ -12,7 +12,12 @@ final class WebSocketController: ObservableObject {
     @Published var requireAccessToken: Bool { didSet { persist(); if !isApplying { applySettings() } } }
     @Published var panLimit: Double { didSet { persist() } }
     @Published var tiltLimit: Double { didSet { persist() } }
-    @Published var loggingEnabled: Bool { didSet { persist() } }
+    @Published var loggingEnabled: Bool {
+        didSet {
+            persist()
+            if loggingEnabled { log("websocket: diagnostics logging enabled") }
+        }
+    }
     @Published private(set) var isListening = false
     @Published private(set) var status = "Stopped"
 
@@ -195,10 +200,17 @@ final class WebSocketController: ObservableObject {
         isAuthenticated = true
         if let command = Self.parse(text) {
             let limits = currentLimits
-            wsLog("command accepted from \(id): pan=\(command.pan), tilt=\(command.tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(gimbal.state.isConnected)")
-            gimbal.setRemotePanTilt(pan: command.pan, tilt: command.tilt,
-                                    panLimit: limits.pan, tiltLimit: limits.tilt)
-            reply("ok", to: connection)
+            let connected = gimbal.state.isConnected
+            wsLog("command accepted from \(id): pan=\(command.pan), tilt=\(command.tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(connected)")
+            let didSend = gimbal.setRemotePanTilt(pan: command.pan, tilt: command.tilt,
+                                                 panLimit: limits.pan, tiltLimit: limits.tilt,
+                                                 diagnostics: loggingEnabled)
+            if didSend {
+                reply("ok", to: connection)
+            } else {
+                wsLog("motion command not sent: gimbal is not connected")
+                reply("error: gimbal not connected", to: connection)
+            }
         } else {
             wsLog("rejected command from \(id): expected pan:X tilt:Y; received \(text.prefix(160))")
             reply("error: expected pan:X tilt:Y", to: connection)
