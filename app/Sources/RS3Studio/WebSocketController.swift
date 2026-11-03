@@ -3,12 +3,13 @@ import Network
 import SwiftUI
 
 /// WebSocket ingress for remote pan/tilt control. Messages are intentionally
-/// small text frames; a client must authenticate once per connection before
-/// sending motion commands.
+/// small text frames; when access-token protection is enabled, each connection
+/// must authenticate before sending motion commands.
 @MainActor
 final class WebSocketController: ObservableObject {
     @Published var enabled: Bool { didSet { persist(); if !isApplying { applySettings() } } }
     @Published var port: Int { didSet { persist(); if !isApplying { applySettings() } } }
+    @Published var requireAccessToken: Bool { didSet { persist(); if !isApplying { applySettings() } } }
     @Published var panLimit: Double { didSet { persist() } }
     @Published var tiltLimit: Double { didSet { persist() } }
     @Published var loggingEnabled: Bool { didSet { persist() } }
@@ -33,6 +34,7 @@ final class WebSocketController: ObservableObject {
         self.gimbal = gimbal
         enabled = defaults.object(forKey: Keys.enabled) as? Bool ?? false
         port = defaults.object(forKey: Keys.port) as? Int ?? 81
+        requireAccessToken = defaults.object(forKey: Keys.requireAccessToken) as? Bool ?? true
         panLimit = defaults.object(forKey: Keys.panLimit) as? Double ?? 1.0
         tiltLimit = defaults.object(forKey: Keys.tiltLimit) as? Double ?? 1.0
         loggingEnabled = defaults.object(forKey: Keys.loggingEnabled) as? Bool ?? false
@@ -99,6 +101,7 @@ final class WebSocketController: ObservableObject {
         guard !isApplying else { return }
         defaults.set(enabled, forKey: Keys.enabled)
         defaults.set(port, forKey: Keys.port)
+        defaults.set(requireAccessToken, forKey: Keys.requireAccessToken)
         defaults.set(panLimit, forKey: Keys.panLimit)
         defaults.set(tiltLimit, forKey: Keys.tiltLimit)
         defaults.set(loggingEnabled, forKey: Keys.loggingEnabled)
@@ -175,7 +178,7 @@ final class WebSocketController: ObservableObject {
         }
 
         var isAuthenticated = authenticated
-        if !isAuthenticated {
+        if requireAccessToken && !isAuthenticated {
             isAuthenticated = text == "auth:\(token)"
             wsLog(isAuthenticated ? "authentication accepted for \(id)" : "authentication rejected for \(id)")
             reply(isAuthenticated ? "ready" : "unauthorized", to: connection)
@@ -183,7 +186,14 @@ final class WebSocketController: ObservableObject {
                 remove(connection, id: id)
                 return
             }
-        } else if let command = Self.parse(text) {
+            receive(on: connection, id: id, authenticated: true)
+            return
+        }
+
+        // In no-token mode, the first message is a motion command. It does not
+        // require an auth frame and subsequent commands are handled identically.
+        isAuthenticated = true
+        if let command = Self.parse(text) {
             let limits = currentLimits
             wsLog("command accepted from \(id): pan=\(command.pan), tilt=\(command.tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(gimbal.state.isConnected)")
             gimbal.setRemotePanTilt(pan: command.pan, tilt: command.tilt,
@@ -228,6 +238,7 @@ final class WebSocketController: ObservableObject {
     private enum Keys {
         static let enabled = "rs3.websocket.enabled"
         static let port = "rs3.websocket.port"
+        static let requireAccessToken = "rs3.websocket.requireAccessToken"
         static let panLimit = "rs3.websocket.panLimit"
         static let tiltLimit = "rs3.websocket.tiltLimit"
         static let loggingEnabled = "rs3.websocket.loggingEnabled"

@@ -20,18 +20,35 @@ struct PreferencesView: View {
                                 .frame(width: 90)
                                 .textFieldStyle(.roundedBorder)
                         }
-                        HStack(alignment: .top) {
-                            Text("Access token")
-                            Spacer()
-                            Text(websocket.token)
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: 310, alignment: .trailing)
+                        Toggle("Require access token", isOn: $websocket.requireAccessToken)
+                        if websocket.requireAccessToken {
+                            HStack(alignment: .top) {
+                                Text("Access token")
+                                Spacer()
+                                Text(websocket.token)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: 310, alignment: .trailing)
+                            }
+                            Text("Send auth:<token> as the first text message on each connection.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text("Token authentication is disabled. Any client able to reach this port can send motion commands; use only on a trusted network.")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+                        Toggle("Log WebSocket diagnostics", isOn: $websocket.loggingEnabled)
+                        Text("When enabled, connection, authentication, command, and network errors are appended to ~/Library/Logs/RoninStudio.log.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(websocket.status)
                             .font(.callout)
                             .foregroundStyle(websocket.isListening ? .green : .secondary)
-                        Text("The listener accepts connections on this Mac's network interfaces. Authenticate each connection by sending auth:<token> as the first text message.")
+                        Text("The listener accepts connections on this Mac's network interfaces.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -43,7 +60,7 @@ struct PreferencesView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         limitSlider("Maximum pan command", value: $websocket.panLimit)
                         limitSlider("Maximum tilt command", value: $websocket.tiltLimit)
-                        Text("Limits cap command strength independently on each axis. They are normalized speed limits, not physical angle or travel stops; the gimbal does not provide position feedback for enforcing angular boundaries.")
+                        Text("Limits cap command strength independently on each axis. They are normalized speed limits, not physical angle or travel stops; the gimbal does not provide position feedback needed to guarantee angular boundaries.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

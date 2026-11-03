@@ -100,23 +100,27 @@ A session log lands at `~/Library/Logs/RoninStudio.log`.
 ## WebSocket control bridge
 
 Enable the WebSocket listener in the Preferences tab. It defaults to port `81`;
-choose another port there if needed. The first text frame authenticates the
-connection, and subsequent frames carry pan/tilt values:
+choose another port there if needed. Access-token authentication is enabled by
+default and can be turned off in Preferences for a trusted network. When
+authentication is enabled, send the token as the first text frame. When it is
+disabled, start with a pan/tilt command:
 
 ```text
-auth:<token>
+auth:<token>             # only when token authentication is enabled
 pan:0.5 tilt:-0.25
 pan:0 tilt:0
 ```
 
-Copy the token shown in Preferences into the client. Pan and tilt are normalized
-to `[-1, 1]` (positive pan is right; positive tilt is up). Preferences provides
-independent maximum pan and tilt command strengths from 0% to 100%; these cap
-speed command magnitude, not physical gimbal angle. A real angular limit cannot
-be guaranteed because the gimbal does not report its current position.
+Pan and tilt are normalized to `[-1, 1]` (positive pan is right; positive tilt
+is up). Preferences provides independent maximum pan and tilt command strengths
+from 0% to 100%; these cap speed command magnitude, not physical gimbal angle.
+A real angular limit cannot be guaranteed because the gimbal does not report its
+current position. Optional WebSocket diagnostics can be enabled in Preferences;
+they are appended to `~/Library/Logs/RoninStudio.log`.
 
 Send updates at roughly 10 Hz while moving. If updates stop, the bridge stops the
-gimbal after 600 ms. For example, with Python's `websockets` package installed:
+gimbal after 600 ms. For example, with Python's `websockets` package installed
+and token authentication enabled:
 
 ```python
 import asyncio
@@ -133,10 +137,12 @@ async def main():
 asyncio.run(main())
 ```
 
-The listener accepts connections on the Mac's network interfaces. Keep the
-token private and prefer a trusted VPN or authenticated tunnel rather than
-exposing the port directly to the public Internet. See
-[`docs/websocket-control.md`](docs/websocket-control.md) for the full protocol.
+The listener accepts connections on the Mac's network interfaces. Without
+token authentication, any reachable client can control the gimbal. Keep
+authentication enabled on untrusted networks and prefer a trusted VPN or
+authenticated tunnel rather than exposing the port directly to the public
+Internet. See [`docs/websocket-control.md`](docs/websocket-control.md) for the
+full protocol.
 
 ## Using the library
 
