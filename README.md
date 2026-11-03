@@ -107,16 +107,20 @@ disabled, start with a pan/tilt command:
 
 ```text
 auth:<token>             # only when token authentication is enabled
-pan:0.5 tilt:-0.25
+pan:0.6
+ tilt:0.9
+pan:0.4 tilt:-0.2
 pan:0 tilt:0
 ```
 
-Pan and tilt are normalized to `[-1, 1]` (positive pan is right; positive tilt
-is up). Preferences provides independent maximum pan and tilt command strengths
-from 0% to 100%; these cap speed command magnitude, not physical gimbal angle.
-A real angular limit cannot be guaranteed because the gimbal does not report its
-current position. Optional WebSocket diagnostics can be enabled in Preferences;
-they are appended to `~/Library/Logs/RoninStudio.log`.
+A frame may contain only `pan:X`, only `tilt:Y`, or both fields. An omitted axis
+is set to zero for that command. Pan and tilt are normalized to `[-1, 1]`
+(positive pan is right; positive tilt is up). Preferences provides independent
+maximum pan and tilt command strengths from 0% to 100%; these cap speed command
+magnitude, not physical gimbal angle. A real angular limit cannot be guaranteed
+because the gimbal does not report its current position. Optional WebSocket
+diagnostics can be enabled in Preferences; they are appended to
+`~/Library/Logs/RoninStudio.log`.
 
 Send updates at roughly 10 Hz while moving. If updates stop, the bridge stops the
 gimbal after 600 ms. For example, with Python's `websockets` package installed
@@ -130,8 +134,10 @@ async def main():
     async with websockets.connect("ws://localhost:81") as ws:
         await ws.send("auth:<token-from-preferences>")
         print(await ws.recv())  # ready
-        await ws.send("pan:0.5 tilt:-0.25")
-        print(await ws.recv())  # ok
+        await ws.send("pan:0.6")
+        print(await ws.recv())  # ok; tilt is zero
+        await ws.send("tilt:0.9")
+        print(await ws.recv())  # ok; pan is zero
         await ws.send("pan:0 tilt:0")
 
 asyncio.run(main())

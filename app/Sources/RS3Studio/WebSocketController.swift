@@ -199,10 +199,12 @@ final class WebSocketController: ObservableObject {
         // require an auth frame and subsequent commands are handled identically.
         isAuthenticated = true
         if let command = Self.parse(text) {
+            let pan = command.pan ?? 0
+            let tilt = command.tilt ?? 0
             let limits = currentLimits
             let connected = gimbal.state.isConnected
-            wsLog("command accepted from \(id): pan=\(command.pan), tilt=\(command.tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(connected)")
-            let didSend = gimbal.setRemotePanTilt(pan: command.pan, tilt: command.tilt,
+            wsLog("command accepted from \(id): pan=\(pan), tilt=\(tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(connected)")
+            let didSend = gimbal.setRemotePanTilt(pan: pan, tilt: tilt,
                                                  panLimit: limits.pan, tiltLimit: limits.tilt,
                                                  diagnostics: loggingEnabled)
             if didSend {
@@ -212,8 +214,8 @@ final class WebSocketController: ObservableObject {
                 reply("error: gimbal not connected", to: connection)
             }
         } else {
-            wsLog("rejected command from \(id): expected pan:X tilt:Y; received \(text.prefix(160))")
-            reply("error: expected pan:X tilt:Y", to: connection)
+            wsLog("rejected command from \(id): expected pan:X and/or tilt:Y; received \(text.prefix(160))")
+            reply("error: expected pan:X and/or tilt:Y", to: connection)
         }
         receive(on: connection, id: id, authenticated: isAuthenticated)
     }
@@ -232,9 +234,11 @@ final class WebSocketController: ObservableObject {
         })
     }
 
-    private nonisolated static func parse(_ message: String) -> (pan: Double, tilt: Double)? {
+    /// Parse one or both axes. An omitted axis is represented as nil and is
+    /// driven at zero for that command, so pan-only input cannot move tilt.
+    private nonisolated static func parse(_ message: String) -> (pan: Double?, tilt: Double?)? {
         let tokens = message.split(whereSeparator: { $0.isWhitespace || $0 == "," })
-        guard tokens.count == 2 else { return nil }
+        guard (1...2).contains(tokens.count) else { return nil }
         var values: [String: Double] = [:]
         for token in tokens {
             let pair = token.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
@@ -243,8 +247,8 @@ final class WebSocketController: ObservableObject {
             guard (key == "pan" || key == "tilt"), values[key] == nil else { return nil }
             values[key] = value
         }
-        guard let pan = values["pan"], let tilt = values["tilt"] else { return nil }
-        return (min(1, max(-1, pan)), min(1, max(-1, tilt)))
+        return (values["pan"].map { min(1, max(-1, $0)) },
+                values["tilt"].map { min(1, max(-1, $0)) })
     }
 
     private enum Keys {

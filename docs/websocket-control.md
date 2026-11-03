@@ -16,8 +16,8 @@ The macOS host can accept WebSocket text frames and translate normalized pan/til
 
 - When token authentication is enabled, the first text frame on each connection must be `auth:<token>`; the server responds `ready` after successful authentication.
 - When authentication is disabled, send motion commands immediately; no auth frame is expected.
-- Each motion frame contains exactly two fields, `pan:X tilt:Y`, with either field order accepted. Commas may separate the fields instead of whitespace.
-- `X` and `Y` are finite numbers, normalized to `[-1, 1]`; values outside that interval are clamped. Positive pan is right; positive tilt is up. The Preferences limits further cap each axis magnitude.
+- A motion frame contains one or two fields: `pan:X`, `tilt:Y`, or both, such as `pan:0.6 tilt:-0.2`. Fields may be separated by whitespace or a comma. Duplicate or unknown fields are invalid.
+- Values are finite numbers normalized to `[-1, 1]`; values outside that interval are clamped. Positive pan is right; positive tilt is up. An omitted axis is commanded as zero for that frame; it does not retain its previous speed. Preferences limits further cap each axis magnitude.
 - Valid motion frames receive `ok`. Invalid or oversized frames are rejected without generating motion. A connection that stops sending updates is stopped automatically after 600 ms; send updates at about 10 Hz for continuous movement.
 - When authentication is enabled, it is checked per connection. Clients receive a short text response (`ready`, `ok`, or an error response).
 
@@ -31,15 +31,19 @@ With authentication enabled:
 
 ```text
 auth:<token>
-pan:0.5 tilt:-0.25
+pan:0.6
+tilt:0.9
+pan:0.4 tilt:-0.2
 pan:0 tilt:0
 ```
 
 With authentication disabled, omit the auth frame:
 
 ```text
-pan:0.5 tilt:-0.25
+pan:0.6
+tilt:0.9
+pan:0.4 tilt:-0.2
 pan:0 tilt:0
 ```
 
-A client should send motion updates periodically while movement is intended. Stopping updates causes the bridge to send a stop command after the timeout.
+A pan-only frame commands zero tilt, and a tilt-only frame commands zero pan. A client should resend the desired command periodically while movement is intended. Stopping updates causes the bridge to send a stop command after the timeout.
