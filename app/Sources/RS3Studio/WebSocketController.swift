@@ -220,13 +220,16 @@ final class WebSocketController: ObservableObject {
 
         var isAuthenticated = authenticated
         if requireAccessToken && !isAuthenticated {
-            isAuthenticated = text == "auth:\(token)"
+            // Interactive websocket clients commonly include a line terminator.
+            // Trim it before the exact token comparison; never log the secret.
+            let authMessage = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            isAuthenticated = authMessage == "auth:\(token)"
             wsLog(isAuthenticated ? "authentication accepted for \(id)" : "authentication rejected for \(id)")
-            reply(isAuthenticated ? "ready" : "unauthorized", to: connection)
             if !isAuthenticated {
-                remove(connection, id: id)
+                replyAndClose("unauthorized", connection: connection, id: id)
                 return
             }
+            reply("ready", to: connection)
             receive(on: connection, id: id, authenticated: true)
             return
         }
@@ -264,6 +267,21 @@ final class WebSocketController: ObservableObject {
         connection.send(content: Data(text.utf8), contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] error in
             if let error {
                 Task { @MainActor in self?.wsLog("failed to send response: \(error.localizedDescription)") }
+            }
+        })
+    }
+
+    /// Send the rejection before closing; cancelling immediately can abort the
+    /// queued WebSocket frame before the client receives it.
+    private func replyAndClose(_ text: String, connection: NWConnection, id: ObjectIdentifier) {
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
+        let context = NWConnection.ContentContext(identifier: "websocket-text", metadata: [metadata])
+        connection.send(content: Data(text.utf8), contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] error in
+            Task { @MainActor in
+                if let error {
+                    self?.wsLog("failed to send rejection response: \(error.localizedDescription)")
+                }
+                self?.remove(connection, id: id)
             }
         })
     }
