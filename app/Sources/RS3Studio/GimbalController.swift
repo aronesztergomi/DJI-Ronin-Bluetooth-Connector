@@ -156,9 +156,11 @@ final class GimbalController: ObservableObject {
         if holdTimer == nil { startSending { [weak self] in self?.stickSpeeds() } }
     }
 
-    /// Apply a normalized remote command after enforcing independent per-axis
-    /// maximum magnitudes. Returns false if there is no live gimbal handle.
-    /// Remote streams stop if updates cease for 600 ms.
+    /// Apply normalized WebSocket pan/tilt values. On this gimbal the physical
+    /// pan and tilt axes correspond to the library's pitch and yaw outputs,
+    /// respectively, so remote controls are intentionally mapped cross-axis.
+    /// Returns false if there is no live gimbal handle. Remote streams stop if
+    /// updates cease for 600 ms.
     @discardableResult
     func setRemotePanTilt(pan: Double, tilt: Double, panLimit: Double, tiltLimit: Double,
                           diagnostics: Bool = false) -> Bool {
@@ -167,15 +169,25 @@ final class GimbalController: ObservableObject {
             return false
         }
         remoteDiagnosticsEnabled = diagnostics
-        let x = min(1, max(-1, pan)) * min(1, max(0, panLimit))
-        let y = min(1, max(-1, tilt)) * min(1, max(0, tiltLimit))
-        stick = (x, y)
-        if holdTimer == nil { startSending { [weak self] in self?.stickSpeeds() } }
+        let boundedPan = min(1, max(-1, pan)) * min(1, max(0, panLimit))
+        let boundedTilt = min(1, max(-1, tilt)) * min(1, max(0, tiltLimit))
+        startSending { [weak self] in
+            self?.remotePanTiltSpeeds(pan: boundedPan, tilt: boundedTilt)
+        }
         remoteTimeout?.cancel()
         let timeout = DispatchWorkItem { [weak self] in self?.stopRemoteMotion() }
         remoteTimeout = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: timeout)
         return true
+    }
+
+    /// Convert semantic remote axes to the physical axes observed on hardware.
+    /// Keep the Preferences locks aligned with their semantic pan/tilt axes.
+    private func remotePanTiltSpeeds(pan: Double, tilt: Double) -> (yaw: Int16, roll: Int16, pitch: Int16) {
+        let magnitude = Double(speedUnits)
+        let yaw = lockTilt ? 0 : Int16(clamping: Int(tilt * magnitude))
+        let pitch = lockPan ? 0 : Int16(clamping: Int(pan * magnitude))
+        return (yaw, 0, pitch)
     }
 
     func stopRemoteMotion() {
