@@ -103,7 +103,7 @@ struct RootView: View {
                         Text("WebSocket · port \(websocket.port)").font(.callout)
                     }
                     if osc.isListening {
-                        Text("OSC · UDP \(osc.port)").font(.callout)
+                        Text("OSC · UDP \(osc.port.formatted(.number.grouping(.never)))").font(.callout)
                     }
                     if !websocket.isListening && !osc.isListening {
                         Text("None").foregroundStyle(.tertiary).font(.callout)
