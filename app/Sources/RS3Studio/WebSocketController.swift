@@ -46,8 +46,9 @@ final class WebSocketController: ObservableObject {
         enabled = defaults.object(forKey: Keys.enabled) as? Bool ?? false
         port = defaults.object(forKey: Keys.port) as? Int ?? 81
         requireAccessToken = defaults.object(forKey: Keys.requireAccessToken) as? Bool ?? true
-        panLimit = defaults.object(forKey: Keys.panLimit) as? Double ?? 1.0
-        tiltLimit = defaults.object(forKey: Keys.tiltLimit) as? Double ?? 1.0
+        // The global remote command limits default to 50% per axis.
+        panLimit = defaults.object(forKey: Keys.panLimit) as? Double ?? 0.5
+        tiltLimit = defaults.object(forKey: Keys.tiltLimit) as? Double ?? 0.5
         loggingEnabled = defaults.object(forKey: Keys.loggingEnabled) as? Bool ?? false
     }
 
