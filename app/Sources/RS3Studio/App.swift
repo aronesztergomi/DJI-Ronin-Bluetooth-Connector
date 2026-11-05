@@ -18,14 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
-    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
 enum Demo {
     static let isOn = CommandLine.arguments.contains("--demo")
-
     static var pane: Pane {
         let args = CommandLine.arguments
         guard let i = args.firstIndex(of: "--demo"), i + 1 < args.count,
@@ -40,12 +37,14 @@ struct RS3StudioApp: App {
     @StateObject private var gimbal: GimbalController
     @StateObject private var presets: PresetStore
     @StateObject private var websocket: WebSocketController
+    @StateObject private var osc: OSCController
 
     init() {
         let gimbal = Demo.isOn ? GimbalController.rendering() : GimbalController()
         _gimbal = StateObject(wrappedValue: gimbal)
         _presets = StateObject(wrappedValue: Demo.isOn ? PresetStore.rendering() : PresetStore())
         _websocket = StateObject(wrappedValue: WebSocketController(gimbal: gimbal))
+        _osc = StateObject(wrappedValue: OSCController(gimbal: gimbal))
     }
 
     var body: some Scene {
@@ -54,15 +53,14 @@ struct RS3StudioApp: App {
                 .environmentObject(gimbal)
                 .environmentObject(presets)
                 .environmentObject(websocket)
+                .environmentObject(osc)
                 .frame(minWidth: 700, minHeight: 480)
         }
         .windowStyle(.titleBar)
         .commands {
             CommandGroup(after: .appInfo) {
-                Button("Connect") { gimbal.connect() }
-                    .keyboardShortcut("k", modifiers: .command)
-                Button("Stop Motion") { gimbal.stop() }
-                    .keyboardShortcut(".", modifiers: .command)
+                Button("Connect") { gimbal.connect() }.keyboardShortcut("k", modifiers: .command)
+                Button("Stop Motion") { gimbal.stop() }.keyboardShortcut(".", modifiers: .command)
             }
         }
     }
@@ -73,9 +71,7 @@ enum Pane: String, CaseIterable, Identifiable {
     case motion = "Motion"
     case presets = "Presets"
     case preferences = "Preferences"
-
     var id: String { rawValue }
-
     var icon: String {
         switch self {
         case .overview: return "square.grid.2x2"
@@ -84,13 +80,13 @@ enum Pane: String, CaseIterable, Identifiable {
         case .preferences: return "gearshape.2"
         }
     }
-
     var implemented: Bool { true }
 }
 
 struct RootView: View {
     @EnvironmentObject private var gimbal: GimbalController
     @EnvironmentObject private var websocket: WebSocketController
+    @EnvironmentObject private var osc: OSCController
     @State private var pane: Pane = Demo.pane
 
     var body: some View {
@@ -98,19 +94,22 @@ struct RootView: View {
             List(selection: $pane) {
                 Section("Control") {
                     ForEach(Pane.allCases) { p in
-                        Label(p.rawValue, systemImage: p.icon)
-                            .tag(p)
+                        Label(p.rawValue, systemImage: p.icon).tag(p)
                             .foregroundStyle(p.implemented ? .primary : .tertiary)
                     }
                 }
                 Section("Controllers") {
-                    Text(websocket.isListening ? "WebSocket · port \(websocket.port)" : "None")
-                        .foregroundStyle(websocket.isListening ? .primary : .tertiary)
-                        .font(.callout)
+                    if websocket.isListening {
+                        Text("WebSocket · port \(websocket.port)").font(.callout)
+                    }
+                    if osc.isListening {
+                        Text("OSC · UDP \(osc.port)").font(.callout)
+                    }
+                    if !websocket.isListening && !osc.isListening {
+                        Text("None").foregroundStyle(.tertiary).font(.callout)
+                    }
                 }
-                Section("Gimbals") {
-                    GimbalSidebarRow()
-                }
+                Section("Gimbals") { GimbalSidebarRow() }
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
@@ -125,14 +124,17 @@ struct RootView: View {
         .onAppear {
             gimbal.connect()
             websocket.applySettings()
+            osc.applySettings()
         }
-        .onDisappear { websocket.stop() }
+        .onDisappear {
+            websocket.stop()
+            osc.stop()
+        }
     }
 }
 
 struct GimbalSidebarRow: View {
     @EnvironmentObject private var gimbal: GimbalController
-
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "gyroscope")
@@ -143,16 +145,13 @@ struct GimbalSidebarRow: View {
                 }
             }
             Spacer()
-            if gimbal.state.isConnected {
-                Circle().fill(Color.green).frame(width: 7, height: 7)
-            }
+            if gimbal.state.isConnected { Circle().fill(Color.green).frame(width: 7, height: 7) }
         }
     }
 }
 
 struct OverviewView: View {
     @EnvironmentObject private var gimbal: GimbalController
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -181,7 +180,6 @@ struct OverviewView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
     }
-
     private func row(_ k: String, _ v: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(k).foregroundStyle(.secondary).frame(width: 170, alignment: .leading)
@@ -193,7 +191,6 @@ struct OverviewView: View {
 
 struct Placeholder: View {
     let name: String
-
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "wrench.and.screwdriver").font(.system(size: 36)).foregroundStyle(.tertiary)
