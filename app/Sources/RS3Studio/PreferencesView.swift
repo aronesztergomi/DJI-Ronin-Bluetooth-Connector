@@ -1,15 +1,20 @@
 import SwiftUI
 
 struct PreferencesView: View {
+    @EnvironmentObject private var gimbal: GimbalController
     @EnvironmentObject private var websocket: WebSocketController
     @EnvironmentObject private var osc: OSCController
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                Text("Preferences")
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Preferences")
+                        .font(.system(size: 34, weight: .light))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    ConnectionBadge()
+                }
 
                 GroupBox("WebSocket bridge") {
                     VStack(alignment: .leading, spacing: 14) {
