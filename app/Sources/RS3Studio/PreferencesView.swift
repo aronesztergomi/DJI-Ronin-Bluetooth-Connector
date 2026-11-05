@@ -48,7 +48,7 @@ struct PreferencesView: View {
                         Toggle("Enable OSC listener", isOn: $osc.enabled)
                         portField("UDP port", value: $osc.port, placeholder: "8000")
                         Toggle("Log OSC diagnostics", isOn: $osc.loggingEnabled)
-                        Text("OSC diagnostics are written separately to ~/Library/Logs/RoninStudio-OSC.log. OSC has no authentication; use only on a trusted network.")
+                        Text("OSC diagnostics are written to ~/Library/Logs/RoninStudio-OSC.log. OSC has no authentication; use only on a trusted network.")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(osc.status)
