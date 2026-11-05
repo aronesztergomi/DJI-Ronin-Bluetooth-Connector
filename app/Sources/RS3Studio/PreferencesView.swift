@@ -46,9 +46,14 @@ struct PreferencesView: View {
                 GroupBox("OSC bridge") {
                     VStack(alignment: .leading, spacing: 14) {
                         Toggle("Enable OSC listener", isOn: $osc.enabled)
+                        if osc.enabled {
+                            Text("OSC has no authentication; use only on a trusted network.")
+                                .font(.callout).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         portField("UDP port", value: $osc.port, placeholder: "8000")
                         Toggle("Log OSC diagnostics", isOn: $osc.loggingEnabled)
-                        Text("OSC diagnostics are written to ~/Library/Logs/RoninStudio-OSC.log. OSC has no authentication; use only on a trusted network.")
+                        Text("OSC diagnostics are written to ~/Library/Logs/RoninStudio-OSC.log.")
                             .font(.callout).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(osc.status)
