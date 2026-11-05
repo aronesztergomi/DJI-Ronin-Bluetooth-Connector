@@ -71,7 +71,7 @@ final class GimbalController: ObservableObject {
     private var speedUnits: Int16 { Int16(200 + panTiltSpeed * 1000) }
 
     init() {
-        let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.85
+        let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.5
         panTiltSpeed = min(1, max(0, savedSpeed))
     }
 
