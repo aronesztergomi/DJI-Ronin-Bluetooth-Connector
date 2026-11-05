@@ -50,9 +50,13 @@ final class GimbalController: ObservableObject {
 
     @Published private(set) var state: State = .disconnected
     @Published private(set) var deviceName = "No gimbal"
-    @Published var panTiltSpeed: Double = 0.85
+    @Published var panTiltSpeed: Double {
+        didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) }
+    }
     @Published var lockPan = false
     @Published var lockTilt = false
+
+    private static let panTiltSpeedDefaultsKey = "rs3.motion.panTiltSpeed"
 
     private var handle: GimbalHandle?
     private let queue = DispatchQueue(label: "co.rs3studio.gimbal")
@@ -65,6 +69,11 @@ final class GimbalController: ObservableObject {
     private var healthTimer: Timer?
 
     private var speedUnits: Int16 { Int16(200 + panTiltSpeed * 1000) }
+
+    init() {
+        let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.85
+        panTiltSpeed = min(1, max(0, savedSpeed))
+    }
 
     static func rendering() -> GimbalController {
         let c = GimbalController()
