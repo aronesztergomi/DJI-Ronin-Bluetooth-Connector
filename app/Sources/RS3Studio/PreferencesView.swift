@@ -78,7 +78,7 @@ struct PreferencesView: View {
         HStack {
             Text(title)
             Spacer()
-            TextField(placeholder, value: value, format: .number)
+            TextField(placeholder, value: value, format: .number.grouping(.never))
                 .frame(width: 90)
                 .textFieldStyle(.roundedBorder)
         }
