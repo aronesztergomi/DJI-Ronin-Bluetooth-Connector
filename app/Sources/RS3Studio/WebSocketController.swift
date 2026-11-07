@@ -15,7 +15,7 @@ final class WebSocketController: ObservableObject {
     @Published var loggingEnabled: Bool {
         didSet {
             persist()
-            if loggingEnabled { log("websocket: diagnostics logging enabled") }
+            if loggingEnabled { wsLog("diagnostics logging enabled") }
         }
     }
     @Published private(set) var isListening = false
@@ -29,6 +29,11 @@ final class WebSocketController: ObservableObject {
     private var connections: [ObjectIdentifier: NWConnection] = [:]
     private var isApplying = false
 
+    private var diagnosticLogURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/RoninStudio-WebSocket.log")
+    }
+
     var token: String {
         if let value = defaults.string(forKey: Keys.token), !value.isEmpty { return value }
         let value = UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -41,19 +46,14 @@ final class WebSocketController: ObservableObject {
         enabled = defaults.object(forKey: Keys.enabled) as? Bool ?? false
         port = defaults.object(forKey: Keys.port) as? Int ?? 81
         requireAccessToken = defaults.object(forKey: Keys.requireAccessToken) as? Bool ?? true
-        panLimit = defaults.object(forKey: Keys.panLimit) as? Double ?? 1.0
-        tiltLimit = defaults.object(forKey: Keys.tiltLimit) as? Double ?? 1.0
+        // The global remote command limits default to 50% per axis.
+        panLimit = defaults.object(forKey: Keys.panLimit) as? Double ?? 0.5
+        tiltLimit = defaults.object(forKey: Keys.tiltLimit) as? Double ?? 0.5
         loggingEnabled = defaults.object(forKey: Keys.loggingEnabled) as? Bool ?? false
     }
 
-    /// Reconcile the live listener with preferences. Cancellation is asynchronous:
-    /// if a listener exists, wait for its `.cancelled` state before rebinding the
-    /// port. This avoids racing the OS while it releases the old listening socket.
     func applySettings() {
-        guard enabled else {
-            stop()
-            return
-        }
+        guard enabled else { stop(); return }
         if let listener {
             status = "Restarting listener…"
             wsLog("restart requested; waiting for current listener to cancel")
@@ -102,12 +102,8 @@ final class WebSocketController: ObservableObject {
                         self.listener = nil
                         self.listenerID = nil
                         self.wsLog("listener cancelled")
-                        if self.enabled {
-                            self.wsLog("starting listener with current preferences on port \(self.port)")
-                            self.startListener()
-                        } else {
-                            self.status = "Stopped"
-                        }
+                        if self.enabled { self.startListener() }
+                        else { self.status = "Stopped" }
                     default: break
                     }
                 }
@@ -126,16 +122,15 @@ final class WebSocketController: ObservableObject {
             wsLog("stopping listener; waiting for socket release")
             status = "Stopping…"
             listener?.cancel()
-        } else {
-            status = "Stopped"
-        }
+        } else { status = "Stopped" }
         stopConnections()
     }
 
     private func stopConnections() {
         for connection in connections.values { connection.cancel() }
         connections.removeAll()
-        gimbal.stopRemoteMotion()
+        // Motion is shared with OSC; the shared 600 ms watchdog safely stops it
+        // if neither service continues sending updates.
     }
 
     private func persist() {
@@ -150,7 +145,7 @@ final class WebSocketController: ObservableObject {
 
     private func wsLog(_ message: String) {
         guard loggingEnabled else { return }
-        log("websocket: \(message)")
+        appendLog("websocket: \(message)", to: diagnosticLogURL)
     }
 
     private func accept(_ connection: NWConnection) {
@@ -160,17 +155,11 @@ final class WebSocketController: ObservableObject {
         connection.stateUpdateHandler = { [weak self] state in
             guard case .failed = state else {
                 if case .cancelled = state {
-                    Task { @MainActor in
-                        self?.wsLog("connection cancelled \(id)")
-                        self?.remove(connection, id: id)
-                    }
+                    Task { @MainActor in self?.wsLog("connection cancelled \(id)"); self?.remove(connection, id: id) }
                 }
                 return
             }
-            Task { @MainActor in
-                self?.wsLog("connection failed \(id)")
-                self?.remove(connection, id: id)
-            }
+            Task { @MainActor in self?.wsLog("connection failed \(id)"); self?.remove(connection, id: id) }
         }
         connection.start(queue: queue)
         receive(on: connection, id: id, authenticated: false)
@@ -193,42 +182,25 @@ final class WebSocketController: ObservableObject {
 
     private func handleMessage(data: Data?, context: NWConnection.ContentContext?, error: NWError?,
                                on connection: NWConnection, id: ObjectIdentifier, authenticated: Bool) {
-        if let error {
-            wsLog("receive error from \(id): \(error.localizedDescription)")
-            remove(connection, id: id)
-            return
-        }
-        guard let data else {
-            wsLog("connection \(id) closed without a message")
-            remove(connection, id: id)
-            return
-        }
+        if let error { wsLog("receive error from \(id): \(error.localizedDescription)"); remove(connection, id: id); return }
+        guard let data else { wsLog("connection \(id) closed without a message"); remove(connection, id: id); return }
         guard data.count <= 512 else {
             wsLog("rejected oversized frame from \(id) (\(data.count) bytes)")
-            reply("error: frame too large", to: connection)
-            remove(connection, id: id)
-            return
+            reply("error: frame too large", to: connection); remove(connection, id: id); return
         }
         guard let text = String(data: data, encoding: .utf8),
               let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
               metadata.opcode == .text else {
             wsLog("rejected non-text or invalid UTF-8 frame from \(id)")
-            reply("error: expected text frame", to: connection)
-            remove(connection, id: id)
-            return
+            reply("error: expected text frame", to: connection); remove(connection, id: id); return
         }
 
         var isAuthenticated = authenticated
         if requireAccessToken && !isAuthenticated {
-            // Interactive websocket clients commonly include a line terminator.
-            // Trim it before the exact token comparison; never log the secret.
             let authMessage = text.trimmingCharacters(in: .whitespacesAndNewlines)
             isAuthenticated = authMessage == "auth:\(token)"
             wsLog(isAuthenticated ? "authentication accepted for \(id)" : "authentication rejected for \(id)")
-            if !isAuthenticated {
-                replyAndClose("unauthorized", connection: connection, id: id)
-                return
-            }
+            if !isAuthenticated { replyAndClose("unauthorized", connection: connection, id: id); return }
             reply("ready", to: connection)
             receive(on: connection, id: id, authenticated: true)
             return
@@ -239,17 +211,12 @@ final class WebSocketController: ObservableObject {
             let pan = command.pan ?? 0
             let tilt = command.tilt ?? 0
             let limits = currentLimits
-            let connected = gimbal.state.isConnected
-            wsLog("command accepted from \(id): pan=\(pan), tilt=\(tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(connected)")
             let didSend = gimbal.setRemotePanTilt(pan: pan, tilt: tilt,
                                                  panLimit: limits.pan, tiltLimit: limits.tilt,
-                                                 diagnostics: loggingEnabled)
-            if didSend {
-                reply("ok", to: connection)
-            } else {
-                wsLog("motion command not sent: gimbal is not connected")
-                reply("error: gimbal not connected", to: connection)
-            }
+                                                 diagnostics: loggingEnabled,
+                                                 source: "websocket", diagnosticLogURL: diagnosticLogURL)
+            wsLog("command accepted from \(id): pan=\(pan), tilt=\(tilt), limits=(pan \(limits.pan), tilt \(limits.tilt)), gimbalConnected=\(didSend)")
+            reply(didSend ? "ok" : "error: gimbal not connected", to: connection)
         } else {
             wsLog("rejected command from \(id): expected pan:X and/or tilt:Y; received \(text.prefix(160))")
             reply("error: expected pan:X and/or tilt:Y", to: connection)
@@ -265,28 +232,22 @@ final class WebSocketController: ObservableObject {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "websocket-text", metadata: [metadata])
         connection.send(content: Data(text.utf8), contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] error in
-            if let error {
-                Task { @MainActor in self?.wsLog("failed to send response: \(error.localizedDescription)") }
-            }
+            if let error { Task { @MainActor in self?.wsLog("failed to send response: \(error.localizedDescription)") } }
         })
     }
 
-    /// Send the rejection before closing; cancelling immediately can abort the
-    /// queued WebSocket frame before the client receives it.
     private func replyAndClose(_ text: String, connection: NWConnection, id: ObjectIdentifier) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "websocket-text", metadata: [metadata])
         connection.send(content: Data(text.utf8), contentContext: context, isComplete: true, completion: .contentProcessed { [weak self] error in
             Task { @MainActor in
-                if let error {
-                    self?.wsLog("failed to send rejection response: \(error.localizedDescription)")
-                }
+                if let error { self?.wsLog("failed to send rejection response: \(error.localizedDescription)") }
                 self?.remove(connection, id: id)
             }
         })
     }
 
-    /// Parse one or both axes. An omitted axis is driven at zero for that frame.
+    /// Parse one or both axes, clamp to [-1, 1], and quantize to 0.01 like OSC.
     private nonisolated static func parse(_ message: String) -> (pan: Double?, tilt: Double?)? {
         let tokens = message.split(whereSeparator: { $0.isWhitespace || $0 == "," })
         guard (1...2).contains(tokens.count) else { return nil }
@@ -296,10 +257,9 @@ final class WebSocketController: ObservableObject {
             guard pair.count == 2, let value = Double(pair[1]), value.isFinite else { return nil }
             let key = pair[0].lowercased()
             guard (key == "pan" || key == "tilt"), values[key] == nil else { return nil }
-            values[key] = value
+            values[key] = min(1, max(-1, (value * 100).rounded() / 100))
         }
-        return (values["pan"].map { min(1, max(-1, $0)) },
-                values["tilt"].map { min(1, max(-1, $0)) })
+        return (values["pan"], values["tilt"])
     }
 
     private enum Keys {

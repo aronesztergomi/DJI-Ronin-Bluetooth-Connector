@@ -11,45 +11,33 @@ let logURL = FileManager.default
     .appendingPathComponent("Library/Logs/RoninStudio.log")
 private let sessionLogQueue = DispatchQueue(label: "co.rs3studio.session-log")
 
-/// Append to the session log, creating ~/Library/Logs if necessary. Previous
-/// writes silently failed on fresh installs when that directory did not exist.
-func log(_ message: String) {
+func appendLog(_ message: String, to url: URL) {
     let line = "\(Date().formatted(date: .omitted, time: .standard)) \(message)\n"
     guard let data = line.data(using: .utf8) else { return }
     sessionLogQueue.async {
         do {
-            try FileManager.default.createDirectory(
-                at: logURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            if FileManager.default.fileExists(atPath: logURL.path) {
-                let file = try FileHandle(forWritingTo: logURL)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let file = try FileHandle(forWritingTo: url)
                 defer { try? file.close() }
                 try file.seekToEnd()
                 try file.write(contentsOf: data)
             } else {
-                try data.write(to: logURL, options: .atomic)
+                try data.write(to: url, options: .atomic)
             }
         } catch {
-            let diagnostic = "Ronin Studio log write failed: \(error.localizedDescription)\n"
-            FileHandle.standardError.write(Data(diagnostic.utf8))
+            FileHandle.standardError.write(Data("Ronin Studio log write failed: \(error.localizedDescription)\n".utf8))
         }
     }
 }
 
+func log(_ message: String) { appendLog(message, to: logURL) }
+
 @MainActor
 final class GimbalController: ObservableObject {
     enum State: Equatable {
-        case disconnected
-        case connecting
-        case connected(version: String)
-        case failed(String)
-
-        var isConnected: Bool {
-            if case .connected = self { return true }
-            return false
-        }
-
+        case disconnected, connecting, connected(version: String), failed(String)
+        var isConnected: Bool { if case .connected = self { return true }; return false }
         var label: String {
             switch self {
             case .disconnected: return "Not connected"
@@ -62,19 +50,30 @@ final class GimbalController: ObservableObject {
 
     @Published private(set) var state: State = .disconnected
     @Published private(set) var deviceName = "No gimbal"
-    @Published var panTiltSpeed: Double = 0.85
+    @Published var panTiltSpeed: Double {
+        didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) }
+    }
     @Published var lockPan = false
     @Published var lockTilt = false
+
+    private static let panTiltSpeedDefaultsKey = "rs3.motion.panTiltSpeed"
 
     private var handle: GimbalHandle?
     private let queue = DispatchQueue(label: "co.rs3studio.gimbal")
     private var holdTimer: Timer?
     private var remoteTimeout: DispatchWorkItem?
     private var remoteDiagnosticsEnabled = false
+    private var remoteSource = "websocket"
+    private var remoteDiagnosticLogURL = logURL
     private var stick: (x: Double, y: Double) = (0, 0)
     private var healthTimer: Timer?
 
     private var speedUnits: Int16 { Int16(200 + panTiltSpeed * 1000) }
+
+    init() {
+        let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.5
+        panTiltSpeed = min(1, max(0, savedSpeed))
+    }
 
     static func rendering() -> GimbalController {
         let c = GimbalController()
@@ -156,24 +155,21 @@ final class GimbalController: ObservableObject {
         if holdTimer == nil { startSending { [weak self] in self?.stickSpeeds() } }
     }
 
-    /// Apply normalized WebSocket pan/tilt values. On this gimbal the physical
-    /// pan and tilt axes correspond to the library's pitch and yaw outputs,
-    /// respectively, so remote controls are intentionally mapped cross-axis.
-    /// Returns false if there is no live gimbal handle. Remote streams stop if
-    /// updates cease for 600 ms.
+    /// Apply normalized remote pan/tilt values shared by WebSocket and OSC.
     @discardableResult
     func setRemotePanTilt(pan: Double, tilt: Double, panLimit: Double, tiltLimit: Double,
-                          diagnostics: Bool = false) -> Bool {
+                          diagnostics: Bool = false, source: String = "websocket",
+                          diagnosticLogURL: URL? = nil) -> Bool {
         guard handle != nil else {
-            if diagnostics { log("websocket: motion ignored because the gimbal is not connected") }
+            if diagnostics, let diagnosticLogURL { appendLog("\(source): motion ignored because the gimbal is not connected", to: diagnosticLogURL) }
             return false
         }
         remoteDiagnosticsEnabled = diagnostics
+        remoteSource = source
+        if let diagnosticLogURL { remoteDiagnosticLogURL = diagnosticLogURL }
         let boundedPan = min(1, max(-1, pan)) * min(1, max(0, panLimit))
         let boundedTilt = min(1, max(-1, tilt)) * min(1, max(0, tiltLimit))
-        startSending { [weak self] in
-            self?.remotePanTiltSpeeds(pan: boundedPan, tilt: boundedTilt)
-        }
+        startSending { [weak self] in self?.remotePanTiltSpeeds(pan: boundedPan, tilt: boundedTilt) }
         remoteTimeout?.cancel()
         let timeout = DispatchWorkItem { [weak self] in self?.stopRemoteMotion() }
         remoteTimeout = timeout
@@ -181,8 +177,6 @@ final class GimbalController: ObservableObject {
         return true
     }
 
-    /// Convert semantic remote axes to the physical axes observed on hardware.
-    /// Keep the Preferences locks aligned with their semantic pan/tilt axes.
     private func remotePanTiltSpeeds(pan: Double, tilt: Double) -> (yaw: Int16, roll: Int16, pitch: Int16) {
         let magnitude = Double(speedUnits)
         let yaw = lockTilt ? 0 : Int16(clamping: Int(tilt * magnitude))
@@ -215,7 +209,8 @@ final class GimbalController: ObservableObject {
         holdTimer?.invalidate()
         let tick: @MainActor () -> Void = { [weak self] in
             guard let self, let h = self.handle, let s = next() else { return }
-            self.send(s, handle: h, reportErrors: self.remoteDiagnosticsEnabled)
+            self.send(s, handle: h, reportErrors: self.remoteDiagnosticsEnabled,
+                      source: self.remoteSource, diagnosticLogURL: self.remoteDiagnosticLogURL)
         }
         tick()
         holdTimer = everyTick(0.1) { tick() }
@@ -249,12 +244,12 @@ final class GimbalController: ObservableObject {
     }
 
     private func send(_ s: (yaw: Int16, roll: Int16, pitch: Int16), handle h: GimbalHandle,
-                      reportErrors: Bool) {
+                      reportErrors: Bool, source: String, diagnosticLogURL: URL) {
         let (yaw, roll, pitch) = s
         queue.async {
             let result = rs3_speed(h.raw, yaw, roll, pitch)
             if reportErrors && result != RS3_OK.rawValue {
-                log("websocket: gimbal speed command failed with status \(result) (yaw=\(yaw), roll=\(roll), pitch=\(pitch))")
+                appendLog("\(source): gimbal speed command failed with status \(result) (yaw=\(yaw), roll=\(roll), pitch=\(pitch))", to: diagnosticLogURL)
             }
         }
     }
