@@ -17,6 +17,6 @@ send 0.40 -1.00
 sleep 1
 send -0.53 0.50
 sleep 1
-send 0.63 0.47
+send 0.63 1.50
 sleep 1
-send 0.00 0.00
+send -0.54 0.00
