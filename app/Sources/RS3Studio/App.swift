@@ -21,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
+/// `--demo [pane]` brings the window up with a stand-in gimbal and sample
+/// presets, and never opens a Bluetooth link. It is how the screenshots are
+/// taken, and it is the only way to see the connected layout without hardware.
 enum Demo {
     static let isOn = CommandLine.arguments.contains("--demo")
     static var pane: Pane {
@@ -80,6 +83,8 @@ enum Pane: String, CaseIterable, Identifiable {
         case .preferences: return "gearshape.2"
         }
     }
+
+    /// Panes with nothing behind them yet are shown but not selectable.
     var implemented: Bool { true }
 }
 
