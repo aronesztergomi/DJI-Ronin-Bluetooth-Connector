@@ -2,10 +2,25 @@ import Foundation
 import RS3Kit
 
 /// The opaque Rust handle, safe to pass between threads.
+///
+/// `UnsafeMutableRawPointer` is not `Sendable`, but this one is: everything
+/// behind it is synchronised on the Rust side (an `Arc<Gimbal>`, a `Mutex` for
+/// the keep-alive slot, and a Tokio runtime owned by the handle). We also fence
+/// every call onto one serial queue.
 struct GimbalHandle: @unchecked Sendable {
     let raw: UnsafeMutableRawPointer
 }
 
+/// Observable wrapper around the Rust library.
+///
+/// Every `rs3_*` call blocks, so they all run on a serial background queue and
+/// publish back on the main actor. Connecting in particular scans for several
+/// seconds and must never touch the main thread.
+/// Session log, appended to `~/Library/Logs/RoninStudio.log`.
+///
+/// A gimbal app that silently stops responding is miserable to debug from a
+/// screenshot. A file rather than os_log because a bundled app's stderr goes
+/// nowhere and the unified log swallowed these entirely.
 let logURL = FileManager.default
     .homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/RoninStudio.log")
@@ -68,19 +83,28 @@ final class GimbalController: ObservableObject {
     private var stick: (x: Double, y: Double) = (0, 0)
     private var healthTimer: Timer?
 
-    private var speedUnits: Int16 { Int16(200 + panTiltSpeed * 1000) }
+    /// Maps the 0...1 slider onto gimbal speed units. 200 moves slowly but
+    /// visibly; 1200 is brisk without being alarming on a balanced rig.
+    private var speedUnits: Int16 {
+        Int16(200 + panTiltSpeed * 1000)
+    }
 
+    /// Apply saved speed or default to 0.5
     init() {
         let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.5
         panTiltSpeed = min(1, max(0, savedSpeed))
     }
 
+    /// A controller that reports a link without touching Bluetooth, for
+    /// screenshots. See `Demo`.
     static func rendering() -> GimbalController {
         let c = GimbalController()
         c.state = .connected(version: "GB52 (7.9.0.2)")
         c.deviceName = "DJI RS3-081GWN"
         return c
     }
+
+    // MARK: - Connection
 
     func connect() {
         log("connect: requested, state=\(state.label)")
@@ -126,6 +150,11 @@ final class GimbalController: ObservableObject {
         queue.async { rs3_disconnect(h.raw) }
     }
 
+    /// Notice the gimbal going away — switched off, out of range, flat battery.
+    ///
+    /// The Rust side probes twice a second; this samples the result. There is
+    /// no "connected but unhealthy" state worth showing, because nothing we
+    /// send arrives either way, so a failed probe just drops the link.
     private func watchLink() {
         healthTimer?.invalidate()
         healthTimer = everyTick(2.0) { [weak self] in
@@ -138,16 +167,37 @@ final class GimbalController: ObservableObject {
         }
     }
 
+    /// A repeating timer that keeps running while the mouse button is held.
+    ///
+    /// `Timer.scheduledTimer` registers for `.default` only, but AppKit runs
+    /// the whole of a mouse drag in `NSEventTrackingRunLoopMode`. A timer
+    /// scheduled the usual way therefore stops firing for exactly as long as
+    /// the user holds the button down — which is when a hold-to-move control
+    /// needs it most. `.common` covers both modes.
     private func everyTick(_ interval: TimeInterval, _ body: @escaping @MainActor () -> Void) -> Timer {
         let timer = Timer(timeInterval: interval, repeats: true) { _ in Task { @MainActor in body() } }
         RunLoop.main.add(timer, forMode: .common)
         return timer
     }
 
+    // MARK: - Motion
+
+    /// Begin moving and keep moving until `endMove()`.
+    ///
+    /// Speed commands express a rate and lapse on their own, so they are
+    /// resent on a timer; the gimbal coasts to a stop if we stop talking.
+    /// The speeds are recomputed on every tick rather than captured once, so
+    /// dragging the speed slider mid-move takes effect immediately.
     func beginMove(_ direction: Direction) {
         guard handle != nil, isAllowed(direction) else { return }
         startSending { [weak self] in self?.mapDirection(direction) }
     }
+
+    /// Continuous control from the joystick.
+    ///
+    /// `x` and `y` are -1...1 with y positive upward. Called on every drag
+    /// change; the resend timer keeps the gimbal moving while the stick is
+    /// held still, which it otherwise would not do.
 
     func setStick(x: Double, y: Double) {
         guard handle != nil else { return }
@@ -205,6 +255,7 @@ final class GimbalController: ObservableObject {
         direction.speeds(magnitude: speedUnits)
     }
 
+    /// Drive the gimbal from a closure sampled on every tick.
     private func startSending(_ next: @escaping @MainActor () -> (yaw: Int16, roll: Int16, pitch: Int16)?) {
         holdTimer?.invalidate()
         let tick: @MainActor () -> Void = { [weak self] in
