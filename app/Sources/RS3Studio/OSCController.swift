@@ -8,10 +8,17 @@ import SwiftUI
 final class OSCController: ObservableObject {
     @Published var enabled: Bool { didSet { persist(); if !isApplying { applySettings() } } }
     @Published var port: Int { didSet { persist(); if !isApplying { applySettings() } } }
+    @Published var allowRemoteHosts: Bool {
+        didSet {
+            persist();
+            applySettings()
+            oscLog("remote hosts \(allowRemoteHosts ? "enabled" : "disabled")")
+       }
+    }
     @Published var loggingEnabled: Bool {
         didSet {
             persist()
-            if loggingEnabled { oscLog("diagnostics logging enabled") }
+            oscLog("diagnostics logging enabled")
         }
     }
     @Published private(set) var isListening = false
@@ -33,6 +40,7 @@ final class OSCController: ObservableObject {
         self.gimbal = gimbal
         enabled = defaults.object(forKey: Keys.enabled) as? Bool ?? false
         port = defaults.object(forKey: Keys.port) as? Int ?? 8000
+        allowRemoteHosts = defaults.object(forKey: Keys.allowRemoteHosts) as? Bool ?? false
         loggingEnabled = defaults.object(forKey: Keys.loggingEnabled) as? Bool ?? false
     }
 
@@ -55,7 +63,14 @@ final class OSCController: ObservableObject {
             return
         }
         do {
-            let newListener = try NWListener(using: .udp, on: nwPort)
+            let params = NWParameters.udp
+            /// OSC Preferences toggle, default off
+            params.acceptLocalOnly = !allowRemoteHosts
+            if !allowRemoteHosts {
+                params.acceptLocalOnly = !allowRemoteHosts
+                /// params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
+            }
+            let newListener = try NWListener(using: params, on: nwPort)
             let id = UUID()
             listener = newListener
             listenerID = id
@@ -122,6 +137,13 @@ final class OSCController: ObservableObject {
         connection.receiveMessage { [weak self] data, _, _, error in
             Task { @MainActor in
                 guard let self else { connection.cancel(); return }
+
+                if !self.allowRemoteHosts && !Self.isLoopback(connection.endpoint) {
+                    self.oscLog("rejected non-loopback OSC peer: \(connection.endpoint)")
+                    connection.cancel()
+                    return
+                }
+
                 if let error {
                     self.oscLog("receive failed: \(error.localizedDescription)")
                 } else if let data {
@@ -130,6 +152,11 @@ final class OSCController: ObservableObject {
                 self.receive(on: connection)
             }
         }
+    }
+
+    private nonisolated static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        guard case let .hostPort(host, _) = endpoint else { return false }
+        return host == .ipv4(.loopback) || host == .ipv6(.loopback)
     }
 
     private func handlePacket(_ data: Data) {
@@ -154,6 +181,7 @@ final class OSCController: ObservableObject {
         guard !isApplying else { return }
         defaults.set(enabled, forKey: Keys.enabled)
         defaults.set(port, forKey: Keys.port)
+        defaults.set(allowRemoteHosts, forKey: Keys.allowRemoteHosts)
         defaults.set(loggingEnabled, forKey: Keys.loggingEnabled)
     }
 
@@ -223,6 +251,7 @@ final class OSCController: ObservableObject {
     private enum Keys {
         static let enabled = "rs3.osc.enabled"
         static let port = "rs3.osc.port"
+        static let allowRemoteHosts = "rs3.osc.allowRemoteHosts"
         static let loggingEnabled = "rs3.osc.loggingEnabled"
     }
 }
