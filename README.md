@@ -97,6 +97,65 @@ be run from a terminal you launched yourself; the app just asks properly.
 
 A session log lands at `~/Library/Logs/RoninStudio.log`.
 
+## WebSocket control bridge
+
+Enable the WebSocket listener in the Preferences tab. It defaults to port `81`;
+choose another port there if needed. Access-token authentication is enabled by
+default and can be turned off in Preferences for a trusted network. When
+authentication is enabled, send the token as the first text frame. When it is
+disabled, start with a pan/tilt command:
+
+```text
+auth:<token>             # only when token authentication is enabled
+pan:0.6
+ tilt:0.9
+pan:0.4 tilt:-0.2
+pan:0 tilt:0
+```
+
+A frame may contain only `pan:X`, only `tilt:Y`, or both fields. An omitted axis
+is set to zero for that command. Pan and tilt are normalized to `[-1, 1]`
+(positive pan is right; positive tilt is up). Preferences provides independent
+maximum pan and tilt command strengths from 0% to 100%; these cap speed command
+magnitude, not physical gimbal angle. A real angular limit cannot be guaranteed
+because the gimbal does not report its current position. Optional WebSocket
+diagnostics can be enabled in Preferences; they are appended to
+`~/Library/Logs/RoninStudio.log`.
+
+Send updates at roughly 10 Hz while moving. If updates stop, the bridge stops the
+gimbal after 600 ms. For example, with Python's `websockets` package installed
+and token authentication enabled:
+
+```python
+import asyncio
+import websockets
+
+async def main():
+    async with websockets.connect("ws://localhost:81") as ws:
+        await ws.send("auth:<token-from-preferences>")
+        print(await ws.recv())  # ready
+        await ws.send("pan:0.6")
+        print(await ws.recv())  # ok; tilt is zero
+        await ws.send("tilt:0.9")
+        print(await ws.recv())  # ok; pan is zero
+        await ws.send("pan:0 tilt:0")
+
+asyncio.run(main())
+```
+
+The listener accepts connections on the Mac's network interfaces. Without
+token authentication, any reachable client can control the gimbal. Keep
+authentication enabled on untrusted networks and prefer a trusted VPN or
+authenticated tunnel rather than exposing the port directly to the public
+Internet. See [`docs/websocket-control.md`](docs/websocket-control.md) for the
+full protocol.
+
+## OSC control bridge
+
+Enable the OSC listener in Preferences to receive OSC over UDP (default port `8000`). It is configured independently from WebSocket, and both services can run simultaneously on separate ports. Configure the listener and optional diagnostics logging under Preferences. OSC diagnostic output is written to `~/Library/Logs/RoninStudio-OSC.log`; WebSocket diagnostics use `~/Library/Logs/RoninStudio-WebSocket.log`.
+
+Send `/pan` or `/tilt` with one numeric OSC argument, or `/panTilt` with two numeric arguments to set both axes together. Values are clamped to `[-1.00, 1.00]` and rounded to two decimal places. Each command with one axis sets the omitted axis to zero. Send updates around 10 Hz while moving; motion stops after 600 ms without updates. The global maximum pan/tilt command strengths in Preferences apply to both protocols. OSC does not provide authentication, so use it only on a trusted network. See [`docs/osc-control.md`](docs/osc-control.md) for the packet format and details.
+
 ## Using the library
 
 ```rust

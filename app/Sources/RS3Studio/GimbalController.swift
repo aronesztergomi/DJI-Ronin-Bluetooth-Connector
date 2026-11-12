@@ -24,32 +24,35 @@ struct GimbalHandle: @unchecked Sendable {
 let logURL = FileManager.default
     .homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/RoninStudio.log")
+private let sessionLogQueue = DispatchQueue(label: "co.rs3studio.session-log")
 
-func log(_ message: String) {
+func appendLog(_ message: String, to url: URL) {
     let line = "\(Date().formatted(date: .omitted, time: .standard)) \(message)\n"
     guard let data = line.data(using: .utf8) else { return }
-    if let h = try? FileHandle(forWritingTo: logURL) {
-        defer { try? h.close() }
-        _ = try? h.seekToEnd()
-        try? h.write(contentsOf: data)
-    } else {
-        try? data.write(to: logURL)
+    sessionLogQueue.async {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let file = try FileHandle(forWritingTo: url)
+                defer { try? file.close() }
+                try file.seekToEnd()
+                try file.write(contentsOf: data)
+            } else {
+                try data.write(to: url, options: .atomic)
+            }
+        } catch {
+            FileHandle.standardError.write(Data("Ronin Studio log write failed: \(error.localizedDescription)\n".utf8))
+        }
     }
 }
+
+func log(_ message: String) { appendLog(message, to: logURL) }
 
 @MainActor
 final class GimbalController: ObservableObject {
     enum State: Equatable {
-        case disconnected
-        case connecting
-        case connected(version: String)
-        case failed(String)
-
-        var isConnected: Bool {
-            if case .connected = self { return true }
-            return false
-        }
-
+        case disconnected, connecting, connected(version: String), failed(String)
+        var isConnected: Bool { if case .connected = self { return true }; return false }
         var label: String {
             switch self {
             case .disconnected: return "Not connected"
@@ -61,19 +64,22 @@ final class GimbalController: ObservableObject {
     }
 
     @Published private(set) var state: State = .disconnected
-    /// What the gimbal calls itself, e.g. "DJI RS3-081GWN".
     @Published private(set) var deviceName = "No gimbal"
-
-    /// Pan/tilt speed, 0...1, mapped onto the gimbal's own units.
-    @Published var panTiltSpeed: Double = 0.85
-
-    /// Axes the directional pad will not drive.
+    @Published var panTiltSpeed: Double {
+        didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) }
+    }
     @Published var lockPan = false
     @Published var lockTilt = false
+
+    private static let panTiltSpeedDefaultsKey = "rs3.motion.panTiltSpeed"
 
     private var handle: GimbalHandle?
     private let queue = DispatchQueue(label: "co.rs3studio.gimbal")
     private var holdTimer: Timer?
+    private var remoteTimeout: DispatchWorkItem?
+    private var remoteDiagnosticsEnabled = false
+    private var remoteSource = "websocket"
+    private var remoteDiagnosticLogURL = logURL
     private var stick: (x: Double, y: Double) = (0, 0)
     private var healthTimer: Timer?
 
@@ -81,6 +87,12 @@ final class GimbalController: ObservableObject {
     /// visibly; 1200 is brisk without being alarming on a balanced rig.
     private var speedUnits: Int16 {
         Int16(200 + panTiltSpeed * 1000)
+    }
+
+    /// Apply saved speed or default to 0.5
+    init() {
+        let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.5
+        panTiltSpeed = min(1, max(0, savedSpeed))
     }
 
     /// A controller that reports a link without touching Bluetooth, for
@@ -96,7 +108,6 @@ final class GimbalController: ObservableObject {
 
     func connect() {
         log("connect: requested, state=\(state.label)")
-        // Retry must work after a failure, not just from a clean start.
         switch state {
         case .connecting, .connected: return
         case .disconnected, .failed: break
@@ -106,29 +117,19 @@ final class GimbalController: ObservableObject {
             let h = rs3_connect()
             guard let h else {
                 log("connect: no gimbal found")
-                Task { @MainActor in
-                    self?.state = .failed("No gimbal found")
-                }
+                Task { @MainActor in self?.state = .failed("No gimbal found") }
                 return
             }
-            // Hold the session and notice a dropped link promptly.
             rs3_set_keepalive(h, 500)
-
             var buf = [CChar](repeating: 0, count: 128)
             let rc = rs3_version(h, &buf, buf.count)
             let version = rc == RS3_OK.rawValue ? String(cString: buf) : "Connected"
-
             var nameBuf = [CChar](repeating: 0, count: 128)
             let nameRC = rs3_name(h, &nameBuf, nameBuf.count)
             let name = nameRC == RS3_OK.rawValue ? String(cString: nameBuf) : "DJI RS gimbal"
-
             let handle = GimbalHandle(raw: h)
-
             Task { @MainActor in
-                guard let self else {
-                    rs3_disconnect(handle.raw)
-                    return
-                }
+                guard let self else { rs3_disconnect(handle.raw); return }
                 self.handle = handle
                 self.deviceName = name
                 self.state = .connected(version: version)
@@ -140,11 +141,9 @@ final class GimbalController: ObservableObject {
 
     func disconnect() {
         holdTimer?.invalidate()
+        remoteTimeout?.cancel()
         healthTimer?.invalidate()
-        guard let h = handle else {
-            state = .disconnected
-            return
-        }
+        guard let h = handle else { state = .disconnected; return }
         handle = nil
         state = .disconnected
         deviceName = "No gimbal"
@@ -175,11 +174,8 @@ final class GimbalController: ObservableObject {
     /// scheduled the usual way therefore stops firing for exactly as long as
     /// the user holds the button down — which is when a hold-to-move control
     /// needs it most. `.common` covers both modes.
-    private func everyTick(_ interval: TimeInterval,
-                           _ body: @escaping @MainActor () -> Void) -> Timer {
-        let timer = Timer(timeInterval: interval, repeats: true) { _ in
-            Task { @MainActor in body() }
-        }
+    private func everyTick(_ interval: TimeInterval, _ body: @escaping @MainActor () -> Void) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in Task { @MainActor in body() } }
         RunLoop.main.add(timer, forMode: .common)
         return timer
     }
@@ -193,12 +189,8 @@ final class GimbalController: ObservableObject {
     /// The speeds are recomputed on every tick rather than captured once, so
     /// dragging the speed slider mid-move takes effect immediately.
     func beginMove(_ direction: Direction) {
-        log("beginMove \(direction) connected=\(state.isConnected)")
         guard handle != nil, isAllowed(direction) else { return }
-        startSending { [weak self] in
-            guard let self else { return nil }
-            return direction.speeds(magnitude: self.speedUnits)
-        }
+        startSending { [weak self] in self?.mapDirection(direction) }
     }
 
     /// Continuous control from the joystick.
@@ -206,18 +198,51 @@ final class GimbalController: ObservableObject {
     /// `x` and `y` are -1...1 with y positive upward. Called on every drag
     /// change; the resend timer keeps the gimbal moving while the stick is
     /// held still, which it otherwise would not do.
+
     func setStick(x: Double, y: Double) {
         guard handle != nil else { return }
         stick = (x, y)
-        if holdTimer == nil {
-            startSending { [weak self] in self?.stickSpeeds() }
-        }
+        if holdTimer == nil { startSending { [weak self] in self?.stickSpeeds() } }
     }
 
-    func releaseStick() {
+    /// Apply normalized remote pan/tilt values shared by WebSocket and OSC.
+    @discardableResult
+    func setRemotePanTilt(pan: Double, tilt: Double, panLimit: Double, tiltLimit: Double,
+                          diagnostics: Bool = false, source: String = "websocket",
+                          diagnosticLogURL: URL? = nil) -> Bool {
+        guard handle != nil else {
+            if diagnostics, let diagnosticLogURL { appendLog("\(source): motion ignored because the gimbal is not connected", to: diagnosticLogURL) }
+            return false
+        }
+        remoteDiagnosticsEnabled = diagnostics
+        remoteSource = source
+        if let diagnosticLogURL { remoteDiagnosticLogURL = diagnosticLogURL }
+        let boundedPan = min(1, max(-1, pan)) * min(1, max(0, panLimit))
+        let boundedTilt = min(1, max(-1, tilt)) * min(1, max(0, tiltLimit))
+        startSending { [weak self] in self?.remotePanTiltSpeeds(pan: boundedPan, tilt: boundedTilt) }
+        remoteTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in self?.stopRemoteMotion() }
+        remoteTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: timeout)
+        return true
+    }
+
+    private func remotePanTiltSpeeds(pan: Double, tilt: Double) -> (yaw: Int16, roll: Int16, pitch: Int16) {
+        let magnitude = Double(speedUnits)
+        let yaw = lockTilt ? 0 : Int16(clamping: Int(tilt * magnitude))
+        let pitch = lockPan ? 0 : Int16(clamping: Int(pan * magnitude))
+        return (yaw, 0, pitch)
+    }
+
+    func stopRemoteMotion() {
+        remoteTimeout?.cancel()
+        remoteTimeout = nil
+        remoteDiagnosticsEnabled = false
         stick = (0, 0)
         endMove()
     }
+
+    func releaseStick() { stick = (0, 0); endMove() }
 
     private func stickSpeeds() -> (yaw: Int16, roll: Int16, pitch: Int16) {
         let m = Double(speedUnits)
@@ -226,12 +251,17 @@ final class GimbalController: ObservableObject {
         return (yaw, 0, pitch)
     }
 
+    private func mapDirection(_ direction: Direction) -> (yaw: Int16, roll: Int16, pitch: Int16)? {
+        direction.speeds(magnitude: speedUnits)
+    }
+
     /// Drive the gimbal from a closure sampled on every tick.
     private func startSending(_ next: @escaping @MainActor () -> (yaw: Int16, roll: Int16, pitch: Int16)?) {
         holdTimer?.invalidate()
         let tick: @MainActor () -> Void = { [weak self] in
             guard let self, let h = self.handle, let s = next() else { return }
-            self.send(s, handle: h)
+            self.send(s, handle: h, reportErrors: self.remoteDiagnosticsEnabled,
+                      source: self.remoteSource, diagnosticLogURL: self.remoteDiagnosticLogURL)
         }
         tick()
         holdTimer = everyTick(0.1) { tick() }
@@ -249,9 +279,7 @@ final class GimbalController: ObservableObject {
         queue.async { _ = rs3_recenter(h.raw) }
     }
 
-    func stop() {
-        endMove()
-    }
+    func stop() { endMove() }
 
     func goTo(_ position: Preset.Position) {
         guard let h = handle else { return }
@@ -266,17 +294,21 @@ final class GimbalController: ObservableObject {
         }
     }
 
-    private func send(_ s: (yaw: Int16, roll: Int16, pitch: Int16), handle h: GimbalHandle) {
+    private func send(_ s: (yaw: Int16, roll: Int16, pitch: Int16), handle h: GimbalHandle,
+                      reportErrors: Bool, source: String, diagnosticLogURL: URL) {
         let (yaw, roll, pitch) = s
-        queue.async { _ = rs3_speed(h.raw, yaw, roll, pitch) }
+        queue.async {
+            let result = rs3_speed(h.raw, yaw, roll, pitch)
+            if reportErrors && result != RS3_OK.rawValue {
+                appendLog("\(source): gimbal speed command failed with status \(result) (yaw=\(yaw), roll=\(roll), pitch=\(pitch))", to: diagnosticLogURL)
+            }
+        }
     }
 }
 
 enum Direction: Int32 {
     case left = 0, right = 1, up = 2, down = 3, rollLeft = 4, rollRight = 5
-
     var raw: Int32 { rawValue }
-
     func speeds(magnitude m: Int16) -> (yaw: Int16, roll: Int16, pitch: Int16) {
         switch self {
         case .left: return (-m, 0, 0)

@@ -1,3 +1,6 @@
 /target
 /app/.build
 /app/*.app
+.DS_store
+*.swp
+DJI-Ronin_autosave
