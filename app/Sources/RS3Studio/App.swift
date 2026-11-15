@@ -42,14 +42,23 @@ enum Demo {
 @main
 struct RS3StudioApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
-    @StateObject private var gimbal = Demo.isOn ? .rendering() : GimbalController()
-    @StateObject private var presets = Demo.isOn ? .rendering() : PresetStore()
+    @StateObject private var gimbal: GimbalController
+    @StateObject private var presets: PresetStore
+    @StateObject private var osc: OSCController
+
+    init() {
+        let gimbal = Demo.isOn ? GimbalController.rendering() : GimbalController()
+        _gimbal = StateObject(wrappedValue: gimbal)
+        _presets = StateObject(wrappedValue: Demo.isOn ? PresetStore.rendering() : PresetStore())
+        _osc = StateObject(wrappedValue: OSCController(gimbal: gimbal))
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(gimbal)
                 .environmentObject(presets)
+                .environmentObject(osc)
                 .frame(minWidth: 700, minHeight: 480)
         }
         .windowStyle(.titleBar)
@@ -83,12 +92,13 @@ enum Pane: String, CaseIterable, Identifiable {
 
     /// Panes with nothing behind them yet are shown but not selectable.
     var implemented: Bool {
-        self == .motion || self == .presets || self == .overview
+        self == .motion || self == .presets || self == .overview || self == .preferences
     }
 }
 
 struct RootView: View {
     @EnvironmentObject private var gimbal: GimbalController
+    @EnvironmentObject private var osc: OSCController
     @State private var pane: Pane = Demo.pane
 
     var body: some View {
@@ -102,7 +112,9 @@ struct RootView: View {
                     }
                 }
                 Section("Controllers") {
-                    Text("None").foregroundStyle(.tertiary).font(.callout)
+                    if osc.isListening {
+                        Text("OSC · UDP \(osc.port.formatted(.number.grouping(.never)))").font(.callout)
+                    }
                 }
                 Section("Gimbals") {
                     GimbalSidebarRow()
@@ -115,10 +127,16 @@ struct RootView: View {
             case .motion: MotionView()
             case .presets: PresetsView()
             case .overview: OverviewView()
-            default: Placeholder(name: pane.rawValue)
+            case .preferences: PreferencesView()
             }
         }
-        .onAppear { gimbal.connect() }
+        .onAppear {
+            gimbal.connect()
+            osc.applySettings()
+        }
+        .onDisappear {
+            osc.stop()
+        }
     }
 }
 
@@ -147,6 +165,7 @@ struct GimbalSidebarRow: View {
 
 struct OverviewView: View {
     @EnvironmentObject private var gimbal: GimbalController
+    @EnvironmentObject private var osc: OSCController
 
     var body: some View {
         ScrollView {

@@ -24,18 +24,29 @@ struct GimbalHandle: @unchecked Sendable {
 let logURL = FileManager.default
     .homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/RoninStudio.log")
+private let sessionLogQueue = DispatchQueue(label: "co.rs3studio.session-log")
 
-func log(_ message: String) {
+func appendLog(_ message: String, to url: URL) {
     let line = "\(Date().formatted(date: .omitted, time: .standard)) \(message)\n"
     guard let data = line.data(using: .utf8) else { return }
-    if let h = try? FileHandle(forWritingTo: logURL) {
-        defer { try? h.close() }
-        _ = try? h.seekToEnd()
-        try? h.write(contentsOf: data)
-    } else {
-        try? data.write(to: logURL)
+    sessionLogQueue.async {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let file = try FileHandle(forWritingTo: url)
+                defer { try? file.close() }
+                try file.seekToEnd()
+                try file.write(contentsOf: data)
+            } else {
+                try data.write(to: url, options: .atomic)
+            }
+        } catch {
+            FileHandle.standardError.write(Data("Ronin Studio log write failed: \(error.localizedDescription)\n".utf8))
+        }
     }
 }
+
+func log(_ message: String) { appendLog(message, to: logURL) }
 
 @MainActor
 final class GimbalController: ObservableObject {
@@ -65,22 +76,37 @@ final class GimbalController: ObservableObject {
     @Published private(set) var deviceName = "No gimbal"
 
     /// Pan/tilt speed, 0...1, mapped onto the gimbal's own units.
-    @Published var panTiltSpeed: Double = 0.85
+    @Published var panTiltSpeed: Double {
+        // didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.85 }
+        didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) }
+    }
 
     /// Axes the directional pad will not drive.
     @Published var lockPan = false
     @Published var lockTilt = false
 
+    private static let panTiltSpeedDefaultsKey = "rs3.motion.panTiltSpeed"
+
     private var handle: GimbalHandle?
     private let queue = DispatchQueue(label: "co.rs3studio.gimbal")
     private var holdTimer: Timer?
+    private var remoteTimeout: DispatchWorkItem?
+    private var remoteDiagnosticsEnabled = false
+    private var remoteSource = "osc"
     private var stick: (x: Double, y: Double) = (0, 0)
     private var healthTimer: Timer?
+    private var remoteDiagnosticLogURL = logURL
 
     /// Maps the 0...1 slider onto gimbal speed units. 200 moves slowly but
     /// visibly; 1200 is brisk without being alarming on a balanced rig.
     private var speedUnits: Int16 {
         Int16(200 + panTiltSpeed * 1000)
+    }
+
+    /// Apply saved speed or default to 0.5
+    init() {
+        let savedSpeed = UserDefaults.standard.object(forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.5
+        panTiltSpeed = min(1, max(0, savedSpeed))
     }
 
     /// A controller that reports a link without touching Bluetooth, for
@@ -141,6 +167,7 @@ final class GimbalController: ObservableObject {
     func disconnect() {
         holdTimer?.invalidate()
         healthTimer?.invalidate()
+        remoteTimeout?.cancel()
         guard let h = handle else {
             state = .disconnected
             return
@@ -214,9 +241,51 @@ final class GimbalController: ObservableObject {
         }
     }
 
+    /// Apply normalized remote pan/tilt values shared by OSC.
+    @discardableResult
+    func setRemotePanTilt(pan: Double, tilt: Double, panLimit: Double, tiltLimit: Double,
+                          diagnostics: Bool = false, source: String = "osc",
+                          diagnosticLogURL: URL? = nil) -> Bool {
+        guard handle != nil else {
+            if diagnostics, let diagnosticLogURL { appendLog("\(source): motion ignored because the gimbal is not connected", to: diagnosticLogURL) }
+            return false
+        }
+
+        remoteDiagnosticsEnabled = diagnostics
+        remoteSource = source
+        if let diagnosticLogURL { remoteDiagnosticLogURL = diagnosticLogURL }
+        let boundedPan = min(1, max(-1, pan)) * min(1, max(0, panLimit))
+        let boundedTilt = min(1, max(-1, tilt)) * min(1, max(0, tiltLimit))
+        startSending { [weak self] in self?.remotePanTiltSpeeds(pan: boundedPan, tilt: boundedTilt) }
+        remoteTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in self?.stopRemoteMotion() }
+        remoteTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: timeout)
+        return true
+    }
+
+    private func remotePanTiltSpeeds(pan: Double, tilt: Double) -> (yaw: Int16, roll: Int16, pitch: Int16) {
+        let magnitude = Double(speedUnits)
+        let yaw = lockTilt ? 0 : Int16(clamping: Int(tilt * magnitude))
+        let pitch = lockPan ? 0 : Int16(clamping: Int(pan * magnitude))
+        return (yaw, 0, pitch)
+    }
+
+    func stopRemoteMotion() {
+        remoteTimeout?.cancel()
+        remoteTimeout = nil
+        remoteDiagnosticsEnabled = false
+        stick = (0, 0)
+        endMove()
+    }
+
     func releaseStick() {
         stick = (0, 0)
         endMove()
+    }
+
+    private func mapDirection(_ direction: Direction) -> (yaw: Int16, roll: Int16, pitch: Int16)? {
+        direction.speeds(magnitude: speedUnits)
     }
 
     private func stickSpeeds() -> (yaw: Int16, roll: Int16, pitch: Int16) {
@@ -231,7 +300,8 @@ final class GimbalController: ObservableObject {
         holdTimer?.invalidate()
         let tick: @MainActor () -> Void = { [weak self] in
             guard let self, let h = self.handle, let s = next() else { return }
-            self.send(s, handle: h)
+            self.send(s, handle: h, reportErrors: self.remoteDiagnosticsEnabled,
+                      source: self.remoteSource, diagnosticLogURL: self.remoteDiagnosticLogURL)
         }
         tick()
         holdTimer = everyTick(0.1) { tick() }
@@ -266,9 +336,17 @@ final class GimbalController: ObservableObject {
         }
     }
 
-    private func send(_ s: (yaw: Int16, roll: Int16, pitch: Int16), handle h: GimbalHandle) {
+    private func send(_ s: (yaw: Int16, roll: Int16, pitch: Int16), handle h: GimbalHandle,
+                      reportErrors: Bool, source: String, diagnosticLogURL: URL) {
         let (yaw, roll, pitch) = s
         queue.async { _ = rs3_speed(h.raw, yaw, roll, pitch) }
+
+        queue.async {
+            let result = rs3_speed(h.raw, yaw, roll, pitch)
+            if reportErrors && result != RS3_OK.rawValue {
+                appendLog("\(source): gimbal speed command failed with status \(result) (yaw=\(yaw), roll=\(roll), pitch=\(pitch))", to: diagnosticLogURL)
+            }
+        }
     }
 }
 
