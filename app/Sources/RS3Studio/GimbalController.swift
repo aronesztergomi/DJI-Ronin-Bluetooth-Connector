@@ -77,7 +77,6 @@ final class GimbalController: ObservableObject {
 
     /// Pan/tilt speed, 0...1, mapped onto the gimbal's own units.
     @Published var panTiltSpeed: Double {
-        // didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) as? Double ?? 0.85 }
         didSet { UserDefaults.standard.set(panTiltSpeed, forKey: Self.panTiltSpeedDefaultsKey) }
     }
 
@@ -266,8 +265,8 @@ final class GimbalController: ObservableObject {
 
     private func remotePanTiltSpeeds(pan: Double, tilt: Double) -> (yaw: Int16, roll: Int16, pitch: Int16) {
         let magnitude = Double(speedUnits)
-        let yaw = lockTilt ? 0 : Int16(clamping: Int(tilt * magnitude))
-        let pitch = lockPan ? 0 : Int16(clamping: Int(pan * magnitude))
+        let yaw = lockPan ? 0 : Int16(clamping: Int(pan * magnitude))
+        let pitch = lockTilt ? 0 : Int16(clamping: Int(tilt * magnitude))
         return (yaw, 0, pitch)
     }
 
@@ -282,10 +281,6 @@ final class GimbalController: ObservableObject {
     func releaseStick() {
         stick = (0, 0)
         endMove()
-    }
-
-    private func mapDirection(_ direction: Direction) -> (yaw: Int16, roll: Int16, pitch: Int16)? {
-        direction.speeds(magnitude: speedUnits)
     }
 
     private func stickSpeeds() -> (yaw: Int16, roll: Int16, pitch: Int16) {
@@ -320,6 +315,8 @@ final class GimbalController: ObservableObject {
     }
 
     func stop() {
+        remoteTimeout?.cancel()
+        remoteTimeout = nil
         endMove()
     }
 
@@ -339,13 +336,9 @@ final class GimbalController: ObservableObject {
     private func send(_ s: (yaw: Int16, roll: Int16, pitch: Int16), handle h: GimbalHandle,
                       reportErrors: Bool, source: String, diagnosticLogURL: URL) {
         let (yaw, roll, pitch) = s
-        queue.async { _ = rs3_speed(h.raw, yaw, roll, pitch) }
-
-        queue.async {
-            let result = rs3_speed(h.raw, yaw, roll, pitch)
-            if reportErrors && result != RS3_OK.rawValue {
-                appendLog("\(source): gimbal speed command failed with status \(result) (yaw=\(yaw), roll=\(roll), pitch=\(pitch))", to: diagnosticLogURL)
-            }
+        let result = queue.sync { rs3_speed(h.raw, yaw, roll, pitch) }
+        if reportErrors && result != RS3_OK.rawValue {
+            appendLog("\(source): gimbal speed command failed with status \(result) (yaw=\(yaw), roll=\(roll), pitch=\(pitch))", to: diagnosticLogURL)
         }
     }
 }

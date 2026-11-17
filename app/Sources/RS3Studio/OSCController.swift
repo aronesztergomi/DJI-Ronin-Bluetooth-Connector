@@ -12,15 +12,15 @@ final class OSCController: ObservableObject {
     @Published var tiltLimit: Double { didSet { persist() } }
     @Published var allowRemoteHosts: Bool {
         didSet {
-            persist();
-            applySettings()
+            persist()
+            if !isApplying { applySettings() }
             oscLog("remote hosts \(allowRemoteHosts ? "enabled" : "disabled")")
        }
     }
     @Published var loggingEnabled: Bool {
         didSet {
             persist()
-            oscLog("diagnostics logging enabled")
+            if loggingEnabled { oscLog("diagnostics logging enabled") }
         }
     }
     @Published private(set) var isListening = false
@@ -73,7 +73,7 @@ final class OSCController: ObservableObject {
             params.acceptLocalOnly = !allowRemoteHosts
             if !allowRemoteHosts {
                 params.acceptLocalOnly = !allowRemoteHosts
-                /// params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
+                // params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
             }
             let newListener = try NWListener(using: params, on: nwPort)
             let id = UUID()
@@ -124,6 +124,8 @@ final class OSCController: ObservableObject {
         } else {
             status = "Stopped"
         }
+
+        gimbal.stopRemoteMotion()
 
         // Remove connections on stop
         let activeConnections = Array(connections.values)
@@ -208,6 +210,8 @@ final class OSCController: ObservableObject {
         defaults.set(port, forKey: Keys.port)
         defaults.set(allowRemoteHosts, forKey: Keys.allowRemoteHosts)
         defaults.set(loggingEnabled, forKey: Keys.loggingEnabled)
+        defaults.set(panLimit, forKey: Keys.panLimit)
+        defaults.set(tiltLimit, forKey: Keys.tiltLimit)
     }
 
     private func oscLog(_ message: String) {

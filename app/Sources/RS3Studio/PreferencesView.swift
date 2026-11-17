@@ -20,9 +20,12 @@ struct PreferencesView: View {
                         Toggle("Enable OSC listener", isOn: $osc.enabled)
                         if osc.enabled {
                             Toggle("Allow connections from remote hosts", isOn: $osc.allowRemoteHosts)
-                            Text("OSC has no authentication; use only on a trusted network.")
+
+                            if osc.allowRemoteHosts {
+                                Text("OSC has no authentication; use only on a trusted network.")
                                 .font(.callout).foregroundStyle(.orange)
                                 .fixedSize(horizontal: false, vertical: true)
+                            }                            
                         }
                         portField("UDP port", value: $osc.port, placeholder: "8000")
                         Toggle("Log OSC diagnostics", isOn: $osc.loggingEnabled)
