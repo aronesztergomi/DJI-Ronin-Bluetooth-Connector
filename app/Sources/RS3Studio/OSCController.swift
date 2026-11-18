@@ -72,13 +72,19 @@ final class OSCController: ObservableObject {
         }
         do {
             let params = NWParameters.udp
-            /// OSC Preferences toggle, default off
-            params.acceptLocalOnly = !allowRemoteHosts
-            if !allowRemoteHosts {
-                params.acceptLocalOnly = !allowRemoteHosts
-                // params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
-            }
-            let newListener = try NWListener(using: params, on: nwPort)
+            let newListener: NWListener
+            if allowRemoteHosts {
+                // Allow the listener to use remote-capable interfaces.
+                newListener = try NWListener(using: params, on: nwPort)
+            } else {
+                // requiredLocalEndpoint supplies the port, so do not pass `on:`.
+                params.requiredLocalEndpoint = .hostPort(
+                    host: .ipv4(.loopback),
+                    port: nwPort
+                )
+                newListener = try NWListener(using: params)
+             }
+
             let id = UUID()
             listener = newListener
             listenerID = id
