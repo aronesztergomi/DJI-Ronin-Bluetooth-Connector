@@ -32,6 +32,9 @@ final class OSCController: ObservableObject {
     private var listener: NWListener?
     private var listenerID: UUID?
     private var connections: [UUID: NWConnection] = [:]
+    private var connectionIdleTimeouts: [UUID: DispatchWorkItem] = [:]
+    private static let maxConnections = 32
+    private static let connectionIdleTimeout: TimeInterval = 2
     private var isApplying = false
 
     private var diagnosticLogURL: URL {
@@ -127,6 +130,9 @@ final class OSCController: ObservableObject {
 
         gimbal.stopRemoteMotion()
 
+        connectionIdleTimeouts.values.forEach { $0.cancel() }
+        connectionIdleTimeouts.removeAll()
+
         // Remove connections on stop
         let activeConnections = Array(connections.values)
         connections.removeAll()
@@ -137,6 +143,12 @@ final class OSCController: ObservableObject {
     }
 
     private func accept(_ connection: NWConnection) {
+        guard connections.count < Self.maxConnections else {
+            oscLog("rejected OSC connection: connection limit reached")
+            connection.cancel()
+            return
+        }
+
         let id = UUID()
         connections[id] = connection
 
@@ -157,13 +169,17 @@ final class OSCController: ObservableObject {
         }
 
         connection.start(queue: queue)
-        receive(on: connection)
+        refreshIdleTimeout(for: id)
+        receive(on: connection, id: id)
     }
 
-    private func receive(on connection: NWConnection) {
+    private func receive(on connection: NWConnection, id: UUID) {
         connection.receiveMessage { [weak self] data, _, _, error in
             Task { @MainActor in
-                guard let self else { connection.cancel(); return }
+                guard let self, self.connections[id] != nil else {
+                    connection.cancel()
+                    return
+                }
 
                 if !self.allowRemoteHosts && !Self.isLoopback(connection.endpoint) {
                     self.oscLog("rejected non-loopback OSC peer: \(connection.endpoint)")
@@ -176,9 +192,29 @@ final class OSCController: ObservableObject {
                 } else if let data {
                     self.handlePacket(data)
                 }
-                self.receive(on: connection)
+                self.refreshIdleTimeout(for: id)
+                self.receive(on: connection, id: id)
             }
         }
+    }
+
+    private func refreshIdleTimeout(for id: UUID) {
+        connectionIdleTimeouts[id]?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            Task { @MainActor in self?.closeConnection(id) }
+        }
+        connectionIdleTimeouts[id] = timeout
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.connectionIdleTimeout,
+            execute: timeout
+        )
+    }
+
+    private func closeConnection(_ id: UUID) {
+        connectionIdleTimeouts.removeValue(forKey: id)?.cancel()
+        guard let connection = connections.removeValue(forKey: id) else { return }
+        connection.stateUpdateHandler = nil
+        connection.cancel()
     }
 
     private nonisolated static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
