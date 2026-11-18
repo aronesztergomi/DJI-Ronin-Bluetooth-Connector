@@ -24,4 +24,4 @@ The global maximum pan and tilt command strengths in Preferences apply to OSC. T
 
 Send `/panTilt` with two float32 arguments `0.50` and `-0.25` to move right and down. To stop explicitly, send `/panTilt` with `0.00, 0.00`. Sending a single-axis message also sets the other axis to zero.
 
-OSC datagrams are parsed as single OSC messages; OSC bundles and wildcard address patterns are not supported. The bridge tracks and cancels at most 32 active UDP endpoint connections.
+OSC datagrams are parsed as single OSC messages; OSC bundles and wildcard address patterns are not supported. The bridge tracks at most 32 active UDP endpoint connections and closes an idle connection after 2 seconds.
