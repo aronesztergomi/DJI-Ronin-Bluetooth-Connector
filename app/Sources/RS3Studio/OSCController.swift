@@ -222,9 +222,10 @@ final class OSCController: ObservableObject {
     /// Parse a single OSC message using float32, float64, or int32 arguments.
     /// Float inputs are rounded to hundredths and clamped to the shared range.
     private nonisolated static func parse(_ data: Data) -> (pan: Double?, tilt: Double?, address: String)? {
+        let bytes = Array(data)
         var cursor = 0
-        guard let address = readString(data, cursor: &cursor),
-              let tags = readString(data, cursor: &cursor), tags.first == "," else { return nil }
+        guard let address = readString(bytes, cursor: &cursor),
+              let tags = readString(bytes, cursor: &cursor), tags.first == "," else { return nil }
         let types = Array(tags.dropFirst())
         guard ["/pan", "/tilt", "/panTilt"].contains(address) else { return nil }
         let expected = address == "/panTilt" ? 2 : 1
@@ -233,13 +234,13 @@ final class OSCController: ObservableObject {
         for type in types {
             switch type {
             case "f":
-                guard let bits = readUInt32(data, cursor: &cursor) else { return nil }
+                guard let bits = readUInt32(bytes, cursor: &cursor) else { return nil }
                 values.append(Double(Float(bitPattern: bits)))
             case "d":
-                guard let bits = readUInt64(data, cursor: &cursor) else { return nil }
+                guard let bits = readUInt64(bytes, cursor: &cursor) else { return nil }
                 values.append(Double(bitPattern: bits))
             case "i":
-                guard let bits = readUInt32(data, cursor: &cursor) else { return nil }
+                guard let bits = readUInt32(bytes, cursor: &cursor) else { return nil }
                 values.append(Double(Int32(bitPattern: bits)))
             default: return nil
             }
@@ -253,26 +254,26 @@ final class OSCController: ObservableObject {
         }
     }
 
-    private nonisolated static func readString(_ data: Data, cursor: inout Int) -> String? {
-        guard cursor < data.count,
-              let end = data[cursor...].firstIndex(of: 0),
-              let value = String(data: data[cursor..<end], encoding: .utf8) else { return nil }
+    private nonisolated static func readString(_ bytes: [UInt8], cursor: inout Int) -> String? {
+    guard cursor < bytes.count,
+          let end = bytes[cursor...].firstIndex(of: 0),
+          let value = String(bytes: bytes[cursor..<end], encoding: .utf8) else { return nil }
         let next = (end + 4) & ~3
-        guard next <= data.count else { return nil }
+    guard next <= bytes.count else { return nil }
         cursor = next
         return value
     }
 
-    private nonisolated static func readUInt32(_ data: Data, cursor: inout Int) -> UInt32? {
-        guard cursor + 4 <= data.count else { return nil }
-        let value = data[cursor..<cursor + 4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    private nonisolated static func readUInt32(_ bytes: [UInt8], cursor: inout Int) -> UInt32? {
+    guard cursor + 4 <= bytes.count else { return nil }
+    let value = bytes[cursor..<cursor + 4].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         cursor += 4
         return value
     }
 
-    private nonisolated static func readUInt64(_ data: Data, cursor: inout Int) -> UInt64? {
-        guard cursor + 8 <= data.count else { return nil }
-        let value = data[cursor..<cursor + 8].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+    private nonisolated static func readUInt64(_ bytes: [UInt8], cursor: inout Int) -> UInt64? {
+        guard cursor + 8 <= bytes.count else { return nil }
+        let value = bytes[cursor..<cursor + 8].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
         cursor += 8
         return value
     }
