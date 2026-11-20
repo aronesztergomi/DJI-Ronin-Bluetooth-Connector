@@ -97,6 +97,12 @@ be run from a terminal you launched yourself; the app just asks properly.
 
 A session log lands at `~/Library/Logs/RoninStudio.log`.
 
+## OSC control bridge
+
+Enable the OSC listener in Preferences to receive OSC over UDP (default port `8000`). By default, the service only listens on loopback interface. Remote hosts and diagnostic logging can be enabled in Preferences. OSC diagnostic output is written to `~/Library/Logs/RoninStudio-OSC.log`.
+
+Send `/pan` or `/tilt` with one numeric OSC argument, or `/panTilt` with two numeric arguments to set both axes together. Values are clamped to `[-1.00, 1.00]` and rounded to two decimal places. Each command with one axis sets the omitted axis to zero. Send updates around 10 Hz while moving; motion stops after 600 ms without updates. Maximum pan/tilt command strengths in Preferences apply. OSC does not provide authentication, so use it only on a trusted network. See [`docs/osc-control.md`](docs/osc-control.md) for packet format and details.
+
 ## Using the library
 
 ```rust
